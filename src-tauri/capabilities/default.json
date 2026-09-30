@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Local library window with native folder selection",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open", "opener:allow-open-url"]
+}
