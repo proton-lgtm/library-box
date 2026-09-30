@@ -25,7 +25,7 @@ import {
   StopCircle,
   X,
 } from "lucide-react";
-import type { Download as DownloadItem, DownloadProgress as ProgressEvent, Game, InstalledGame } from "./types";
+import type { Download as DownloadItem, DownloadProgress as ProgressEvent, Game, GameFile, InstalledGame } from "./types";
 import { formatBytes as prettySize } from "./utils";
 
 type Page = "home" | "library" | "downloads";
@@ -70,6 +70,8 @@ function App() {
   const [folder, setFolder] = useState("");
   const [runAfter, setRunAfter] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -121,6 +123,27 @@ function App() {
     };
   }, [refresh]);
 
+  useEffect(() => {
+    if (!selected) return;
+    let active = true;
+    setFilesLoading(true);
+    setSelectedFileName(null);
+    void invoke<GameFile[]>("refresh_game_files", { gameId: selected.id })
+      .then((files) => {
+        if (!active) return;
+        setGames((items) => items.map((game) => game.id === selected.id ? { ...game, files } : game));
+        setSelected((game) => game?.id === selected.id ? { ...game, files } : game);
+        setSelectedFileName(files.find((file) => file.installable)?.fileName ?? null);
+      })
+      .catch((e: unknown) => {
+        if (active) setActionError(`Could not check itch.io downloads: ${String(e)}`);
+      })
+      .finally(() => {
+        if (active) setFilesLoading(false);
+      });
+    return () => { active = false; };
+  }, [selected?.id]);
+
   const filteredGames = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return games;
@@ -130,6 +153,8 @@ function App() {
   }, [games, query]);
 
   const topGame = selected ?? games[0];
+  const installableFiles = selected?.files.filter((file) => file.installable) ?? [];
+  const modalInstallableFiles = modalGame?.files.filter((file) => file.installable) ?? [];
   const activeCount = downloads.filter((item) =>
     ["downloading", "paused", "failed"].includes(item.status),
   ).length;
@@ -150,6 +175,8 @@ function App() {
         gameId: modalGame.id,
         destination: folder,
         runAfter,
+        fileName: selectedFileName,
+        uploadId: modalGame.files.find((file) => file.fileName === selectedFileName)?.uploadId ?? null,
       });
       setModalGame(null);
       setFolder("");
@@ -241,22 +268,29 @@ function App() {
                 <div className="eyebrow"><span className="live-pip" /> FEATURED FROM ITCH.IO</div>
                 <h1>{selected.title}</h1>
                 <p className="creator-line">A game by <strong>{selected.creator}</strong></p>
-                <div className="meta-row"><span>{selected.genre || "Visual Novel"}</span><span>{selected.published || "itch.io"}</span><span>REN’PY</span></div>
+                <div className="meta-row"><span>{selected.genre || "Visual Novel"}</span><span>{selected.published || "itch.io"}</span><span>REN’PY</span>{selected.browserPlayable && <span>BROWSER PLAY</span>}</div>
                 <p className="detail-description">{selected.description || "A story-driven game made with Ren'Py. Visit its itch.io page for full details, screenshots, and creator information."}</p>
                 <div className="detail-actions">
-                  <button className="button-primary" onClick={() => {
+                  <button className="button-primary" disabled={filesLoading} onClick={() => {
                     setActionError("");
-                    if (selected.downloadUrl && !selected.browserOnly) {
+                    if ((installableFiles.length > 0 || selected.downloadUrl) && !selected.browserOnly) {
                       setModalGame(selected);
                     } else {
                       void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)));
                     }
                   }}>
-                    <Download size={18} /> {selected.downloadStatus === "installed" ? "INSTALL ANOTHER COPY" : selected.downloadUrl && !selected.browserOnly ? "DOWNLOAD GAME" : "OPEN ON ITCH.IO"}
+                    <Download size={18} /> {filesLoading ? "CHECKING DOWNLOADS..." : selected.downloadStatus === "installed" ? "INSTALL ANOTHER COPY" : (installableFiles.length > 0 || selected.downloadUrl) && !selected.browserOnly ? "DOWNLOAD GAME" : selected.browserOnly ? "PLAY IN BROWSER" : "OPEN ON ITCH.IO"}
                   </button>
-                  <button className="button-secondary" onClick={() => void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)))}>VIEW ON ITCH.IO <ArrowUpRight size={16} /></button>
+                  <button className="button-secondary" onClick={() => void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)))}>{selected.browserPlayable ? "PLAY IN BROWSER" : "VIEW ON ITCH.IO"} <ArrowUpRight size={16} /></button>
                 </div>
-                {!selected.downloadUrl && <p className="hint-text">{selected.browserOnly ? "This entry is browser-only and has no desktop archive. Open itch.io to play it in your browser." : "No verified public desktop archive is available to Redline yet. Open itch.io to check the creator’s available versions."}</p>}
+                {selected.files.length > 0 && <div className="available-files">
+                  <span className="field-label">AVAILABLE DOWNLOADS</span>
+                  {selected.files.map((file, index) => <div className="available-file" key={file.uploadId ?? `${file.fileName}-${index}`}>
+                    <span>{file.fileName}</span><strong>{[file.installable ? "REDLINE DOWNLOAD" : file.uploadId === null ? "ACCESS FLOW REQUIRED" : "NOT INSTALLABLE HERE", file.size, file.platforms.join(", ")].filter(Boolean).join(" · ") || "Platform not specified"}</strong>
+                  </div>)}
+                </div>}
+                {!filesLoading && selected.files.length > 0 && installableFiles.length === 0 && <p className="hint-text">itch.io lists these files, but none is publicly available to Redline as an installable archive for this computer. Open itch.io to complete any required access or choose another version.</p>}
+                {!filesLoading && selected.files.length === 0 && !selected.downloadUrl && <p className="hint-text">{selected.browserOnly ? "This entry is browser-only and has no desktop archive. Open itch.io to play it in your browser." : "The public game page did not expose a downloadable file. Open itch.io to check for browser play, restricted downloads, or creator updates."}</p>}
                 {selected.downloadStatus === "installed" && <div className="installed-note"><Check size={16} /> In your library</div>}
               </div>
             </div>
@@ -333,7 +367,7 @@ function App() {
                     <div className="download-foot"><span>{item.error || (pct !== null ? `${pct}% complete` : item.status === "downloading" ? "Receiving data…" : item.status === "installed" ? "Installed successfully" : item.installDir)}</span><div className="download-controls">
                       {item.status === "downloading" && <button title="Pause download" onClick={() => void report(invoke("pause_download", { gameId: item.gameId }))}><Pause size={16} /></button>}
                       {item.status === "paused" && <button title="Resume download" onClick={() => void report(invoke("resume_download", { gameId: item.gameId }))}><CirclePlay size={17} /></button>}
-                      {item.status === "failed" && <button title="Retry download" onClick={() => {if(game){setFolder(item.installDir.replace(/[\\/][^\\/]+$/, ""));setModalGame(game);}}}><CirclePlay size={17} /></button>}
+                      {item.status === "failed" && <button title="Retry download" onClick={() => {if(game){setFolder(item.installDir.replace(/[\\/][^\\/]+$/, ""));setSelectedFileName(game.files.find((file) => file.installable)?.fileName ?? null);setModalGame(game);}}}><CirclePlay size={17} /></button>}
                       {item.status !== "installed" && <button title="Cancel download" onClick={() => void report(invoke("cancel_download", { gameId: item.gameId }))}><X size={16} /></button>}
                       {item.status === "installed" && <span className="completed-mark"><Check size={16} /> READY</span>}
                     </div></div>
@@ -352,7 +386,10 @@ function App() {
             <div className="modal-icon"><Download size={21} /></div>
             <div className="eyebrow muted">NEW INSTALL</div>
             <h2 id="download-title">Download {modalGame.title}</h2>
-            <p className="modal-copy">Choose where Redline should install this game. The download runs in the background and can be managed from Downloads.</p>
+            <p className="modal-copy">Choose an available game file and where Redline should install it. The download runs in the background and can be managed from Downloads.</p>
+            {modalInstallableFiles.length > 0 && <><label className="field-label" htmlFor="download-file">GAME FILE</label><select id="download-file" className="file-picker" value={selectedFileName ?? ""} onChange={(event) => setSelectedFileName(event.target.value)}>
+            {modalInstallableFiles.map((file) => <option key={file.fileName} value={file.fileName}>{file.fileName} — {[file.size, file.platforms.join(", ")].filter(Boolean).join(" · ") || "platform not specified"}</option>)}
+            </select></>}
             <label className="field-label">INSTALL LOCATION</label>
             <div className="folder-picker"><span title={folder}>{folder || "Choose a folder on this device"}</span><button onClick={() => void chooseFolder()}><Plus size={15} /> BROWSE</button></div>
             <label className="check-row">
@@ -360,8 +397,8 @@ function App() {
               <span className="custom-check"><Check size={13} /></span>
               <span><strong>Launch when installation finishes</strong><small>Start the game automatically after it is installed.</small></span>
             </label>
-            <div className="modal-actions"><button className="button-secondary" onClick={() => setModalGame(null)}>CANCEL</button><button className="button-primary" disabled={!folder || starting} onClick={() => void beginDownload()}>{starting ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />} START DOWNLOAD</button></div>
-            <div className="modal-safety"><ShieldCheck size={14} /> Downloads come directly from a verified public itch.io archive.</div>
+            <div className="modal-actions"><button className="button-secondary" onClick={() => setModalGame(null)}>CANCEL</button><button className="button-primary" disabled={!folder || starting || (modalInstallableFiles.length > 0 && !modalGame.files.some((file) => file.fileName === selectedFileName && file.installable))} onClick={() => void beginDownload()}>{starting ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />} START DOWNLOAD</button></div>
+            <div className="modal-safety"><ShieldCheck size={14} /> itch.io authorizes each file request; paid or restricted downloads are not bypassed.</div>
           </section>
         </div>
       )}

@@ -12,6 +12,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
+use regex::Regex;
 use reqwest::{header, Client};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,19 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     transfers: Arc<Mutex<HashMap<i64, Arc<TransferControl>>>>,
     running: Arc<Mutex<HashMap<i64, Child>>>,
+}
+
+#[test]
+fn reads_csrf_tokens_from_itch_meta_and_form_inputs() {
+    assert_eq!(
+        parse_csrf_token(r#"<meta name="csrf_token" content="meta-token">"#).unwrap(),
+        Some("meta-token".into())
+    );
+    assert_eq!(
+        parse_csrf_token(r#"<input name="csrf_token" value="form-token">"#).unwrap(),
+        Some("form-token".into())
+    );
+    assert_eq!(parse_csrf_token("<html></html>").unwrap(), None);
 }
 
 struct TransferControl {
@@ -45,7 +59,19 @@ struct Game {
     genre: String,
     published: String,
     browser_only: bool,
+    browser_playable: bool,
     download_status: Option<String>,
+    files: Vec<GameFile>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GameFile {
+    upload_id: Option<i64>,
+    file_name: String,
+    size: Option<String>,
+    platforms: Vec<String>,
+    installable: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -100,6 +126,9 @@ struct CatalogSeed {
 struct TransferRecord {
     game_id: i64,
     url: String,
+    game_url: String,
+    upload_id: Option<i64>,
+    file_name: Option<String>,
     archive_path: PathBuf,
     install_dir: PathBuf,
     run_after: bool,
@@ -137,7 +166,9 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
                 download_url TEXT,
                 genre TEXT NOT NULL,
                 published TEXT NOT NULL,
-                browser_only INTEGER NOT NULL DEFAULT 0
+                browser_only INTEGER NOT NULL DEFAULT 0,
+                browser_playable INTEGER NOT NULL DEFAULT 0,
+                files_json TEXT NOT NULL DEFAULT '[]'
             );
             CREATE TABLE IF NOT EXISTS downloads (
                 game_id INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
@@ -149,13 +180,14 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
                 install_dir TEXT NOT NULL,
                 launch_path TEXT,
                 run_after INTEGER NOT NULL DEFAULT 0,
+                selected_file_name TEXT,
                 error TEXT,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             ",
         )
         .map_err(|error| format!("Cannot initialize library database: {error}"))?;
-    let has_browser_only = {
+    let columns = {
         let mut statement = connection
             .prepare("PRAGMA table_info(games)")
             .map_err(|error| format!("Cannot inspect database schema: {error}"))?;
@@ -164,12 +196,60 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
             .map_err(|error| format!("Cannot inspect database schema: {error}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("Cannot inspect database schema: {error}"))?;
-        columns.iter().any(|name| name == "browser_only")
+        columns
     };
-    if !has_browser_only {
+    if !columns.iter().any(|name| name == "browser_only") {
         connection
             .execute(
                 "ALTER TABLE games ADD COLUMN browser_only INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|error| format!("Cannot upgrade library database: {error}"))?;
+    }
+    if !columns.iter().any(|name| name == "files_json") {
+        connection
+            .execute(
+                "ALTER TABLE games ADD COLUMN files_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )
+            .map_err(|error| format!("Cannot upgrade library database: {error}"))?;
+    }
+    if !columns.iter().any(|name| name == "browser_playable") {
+        connection
+            .execute(
+                "ALTER TABLE games ADD COLUMN browser_playable INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|error| format!("Cannot upgrade library database: {error}"))?;
+    }
+    connection
+        .execute("UPDATE games SET browser_only=0 WHERE slug='remember'", [])
+        .map_err(|error| {
+            format!("Cannot update Remember's current itch.io availability: {error}")
+        })?;
+    let download_columns = {
+        let mut statement = connection
+            .prepare("PRAGMA table_info(downloads)")
+            .map_err(|error| format!("Cannot inspect database schema: {error}"))?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| format!("Cannot inspect database schema: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Cannot inspect database schema: {error}"))?;
+        columns
+    };
+    if !download_columns.iter().any(|name| name == "upload_id") {
+        connection
+            .execute("ALTER TABLE downloads ADD COLUMN upload_id INTEGER", [])
+            .map_err(|error| format!("Cannot upgrade library database: {error}"))?;
+    }
+    if !download_columns
+        .iter()
+        .any(|name| name == "selected_file_name")
+    {
+        connection
+            .execute(
+                "ALTER TABLE downloads ADD COLUMN selected_file_name TEXT",
                 [],
             )
             .map_err(|error| format!("Cannot upgrade library database: {error}"))?;
@@ -207,37 +287,433 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
 fn query_games(connection: &Connection) -> Result<Vec<Game>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT g.id,g.slug,g.title,g.creator,g.description,g.cover_url,g.game_url,g.download_url,g.genre,g.published,d.status,g.browser_only
+            "SELECT g.id,g.slug,g.title,g.creator,g.description,g.cover_url,g.game_url,g.download_url,g.genre,g.published,d.status,g.browser_only,g.browser_playable,g.files_json
              FROM games g LEFT JOIN downloads d ON d.game_id=g.id ORDER BY g.id",
         )
         .map_err(|error| format!("Cannot query games: {error}"))?;
     let result = statement
         .query_map([], |row| {
-            Ok(Game {
-                id: row.get(0)?,
-                slug: row.get(1)?,
-                title: row.get(2)?,
-                creator: row.get(3)?,
-                description: row.get(4)?,
-                cover_url: row.get(5)?,
-                game_url: row.get(6)?,
-                download_url: row.get(7)?,
-                genre: row.get(8)?,
-                published: row.get(9)?,
-                download_status: row.get(10)?,
-                browser_only: row.get::<_, i64>(11)? != 0,
-            })
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, i64>(11)? != 0,
+                row.get::<_, i64>(12)? != 0,
+                row.get::<_, String>(13)?,
+            ))
         })
         .map_err(|error| format!("Cannot query games: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("Cannot read game catalog: {error}"))?;
-    Ok(result)
+    result
+        .into_iter()
+        .map(
+            |(
+                id,
+                slug,
+                title,
+                creator,
+                description,
+                cover_url,
+                game_url,
+                download_url,
+                genre,
+                published,
+                download_status,
+                browser_only,
+                browser_playable,
+                files_json,
+            )| {
+                let files = serde_json::from_str(&files_json)
+                    .map_err(|error| format!("Cannot read scraped game files: {error}"))?;
+                Ok(Game {
+                    id,
+                    slug,
+                    title,
+                    creator,
+                    description,
+                    cover_url,
+                    game_url,
+                    download_url,
+                    genre,
+                    published,
+                    download_status,
+                    browser_only,
+                    browser_playable,
+                    files,
+                })
+            },
+        )
+        .collect()
 }
 
 #[tauri::command]
 fn list_games(state: State<'_, AppState>) -> Result<Vec<Game>, String> {
     let db = state.db.lock().map_err(|_| lock_error())?;
     query_games(&db)
+}
+
+fn parse_itch_game_files(html: &str) -> Result<Vec<GameFile>, String> {
+    let upload_blocks =
+        Regex::new(r#"(?is)<div\s+class=["'][^"']*\bupload\b[^"']*["'][^>]*>(.*?)</div>\s*</div>"#)
+            .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
+    let upload_id_pattern = Regex::new(r#"data-upload_id=["'](\d+)["']"#)
+        .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
+    let name_pattern = Regex::new(r#"(?is)<strong\b[^>]*\btitle=["']([^"']+)["'][^>]*>"#)
+        .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
+    let size_pattern =
+        Regex::new(r#"(?is)class=["'][^"']*\bfile_size\b[^"']*["'][^>]*>\s*<span[^>]*>\s*([^<]+)"#)
+            .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
+    let platform_pattern = Regex::new(r#"(?is)title=["']Download for ([^"']+)["']"#)
+        .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
+    let mut files = Vec::new();
+    for upload in upload_blocks.captures_iter(html) {
+        let block = upload
+            .get(1)
+            .map(|capture| capture.as_str())
+            .unwrap_or_default();
+        let upload_id = upload_id_pattern
+            .captures(block)
+            .and_then(|capture| capture.get(1))
+            .and_then(|capture| capture.as_str().parse::<i64>().ok());
+        let Some(file_name) = name_pattern
+            .captures(block)
+            .and_then(|capture| capture.get(1))
+            .map(|capture| decode_html_text(capture.as_str()))
+        else {
+            continue;
+        };
+        let size = size_pattern
+            .captures(block)
+            .and_then(|capture| capture.get(1))
+            .map(|capture| decode_html_text(capture.as_str()).trim().to_string())
+            .filter(|value| !value.is_empty());
+        let platforms: Vec<String> = platform_pattern
+            .captures_iter(block)
+            .filter_map(|capture| capture.get(1))
+            .map(|capture| decode_html_text(capture.as_str()).trim().to_string())
+            .collect();
+        files.push(GameFile {
+            upload_id,
+            installable: is_installable_file(&file_name, &platforms),
+            file_name,
+            size,
+            platforms,
+        });
+    }
+    Ok(files)
+}
+
+fn is_installable_file(file_name: &str, platforms: &[String]) -> bool {
+    if !file_name.to_ascii_lowercase().ends_with(".zip") {
+        return false;
+    }
+    let platforms = platforms.join(" ").to_ascii_lowercase();
+    #[cfg(target_os = "windows")]
+    let supported =
+        platforms.is_empty() || platforms.contains("windows") || platforms.contains("pc");
+    #[cfg(target_os = "macos")]
+    let supported = platforms.is_empty() || platforms.contains("mac") || platforms.contains("os x");
+    #[cfg(target_os = "linux")]
+    let supported = platforms.is_empty() || platforms.contains("linux");
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let supported = false;
+    supported
+}
+
+fn decode_html_text(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+#[tauri::command]
+async fn refresh_game_files(
+    game_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<GameFile>, String> {
+    let (game_url, browser_only) = {
+        let db = state.db.lock().map_err(|_| lock_error())?;
+        db.query_row(
+            "SELECT game_url,browser_only FROM games WHERE id=?1",
+            [game_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        .map_err(|error| format!("Cannot load game details: {error}"))?
+        .ok_or_else(|| "That game is no longer in the catalog.".to_string())?
+    };
+    if browser_only {
+        return Ok(Vec::new());
+    }
+    let page_url = url::Url::parse(&game_url)
+        .map_err(|error| format!("Invalid itch.io game page URL: {error}"))?;
+    validate_itch_page_url(&page_url)?;
+    let client = Client::builder()
+        .user_agent(concat!("RedlineLibrary/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|error| format!("Cannot initialize itch.io metadata client: {error}"))?;
+    let response = client
+        .get(page_url)
+        .send()
+        .await
+        .map_err(|error| format!("Cannot read the itch.io game page: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "itch.io returned HTTP {} for this game page.",
+            response.status()
+        ));
+    }
+    let html = response
+        .text()
+        .await
+        .map_err(|error| format!("Cannot read itch.io game metadata: {error}"))?;
+    let files = parse_itch_game_files(&html)?;
+    let files_json = serde_json::to_string(&files)
+        .map_err(|error| format!("Cannot save itch.io file metadata: {error}"))?;
+    let browser_playable = page_is_browser_playable(&html)?;
+    state
+        .db
+        .lock()
+        .map_err(|_| lock_error())?
+        .execute(
+            "UPDATE games SET files_json=?2,browser_playable=?3 WHERE id=?1",
+            params![
+                game_id,
+                files_json,
+                if browser_playable { 1_i64 } else { 0_i64 }
+            ],
+        )
+        .map_err(|error| format!("Cannot save itch.io file metadata: {error}"))?;
+    Ok(files)
+}
+
+fn page_is_browser_playable(html: &str) -> Result<bool, String> {
+    let pattern = Regex::new(r#""type_name"\s*:\s*"html""#)
+        .map_err(|error| format!("Cannot prepare itch.io game type parser: {error}"))?;
+    Ok(pattern.is_match(html))
+}
+
+fn validate_itch_page_url(page_url: &url::Url) -> Result<(), String> {
+    let host = page_url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if page_url.scheme() != "https" || !(host == "itch.io" || host.ends_with(".itch.io")) {
+        return Err("Game pages must be HTTPS itch.io URLs.".into());
+    }
+    Ok(())
+}
+
+async fn resolve_itch_download(game_url: &str, file_name: &str) -> Result<String, String> {
+    let page_url = url::Url::parse(game_url)
+        .map_err(|error| format!("Invalid itch.io game page URL: {error}"))?;
+    validate_itch_page_url(&page_url)?;
+    let client = Client::builder()
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        )
+        .cookie_store(true)
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|error| format!("Cannot initialize itch.io download client: {error}"))?;
+    let game_page = client
+        .get(page_url.clone())
+        .send()
+        .await
+        .map_err(|error| format!("Cannot prepare the itch.io download: {error}"))?;
+    if !game_page.status().is_success() {
+        return Err(format!(
+            "itch.io returned HTTP {} before download authorization.",
+            game_page.status()
+        ));
+    }
+    let html = game_page
+        .text()
+        .await
+        .map_err(|error| format!("Cannot read itch.io game page: {error}"))?;
+    let csrf = parse_csrf_token(&html)?.ok_or_else(|| {
+        "itch.io did not provide a download authorization token; open the game page in your browser."
+            .to_string()
+    })?;
+    let listed_file = parse_itch_game_files(&html)?
+        .into_iter()
+        .find(|file| file.file_name == file_name && file.installable)
+        .ok_or_else(|| {
+            "The selected file is no longer listed as an installable file on itch.io.".to_string()
+        })?;
+    let upload_id = listed_file.upload_id;
+    let minimum_price = Regex::new(r#""min_price"\s*:\s*(\d+)"#)
+        .map_err(|error| format!("Cannot prepare itch.io price check: {error}"))?
+        .captures(&html)
+        .and_then(|capture| capture.get(1))
+        .and_then(|capture| capture.as_str().parse::<u64>().ok())
+        .unwrap_or(0);
+    if minimum_price > 0 {
+        return Err(
+            "This game requires purchase on itch.io. Open its page to complete the purchase."
+                .into(),
+        );
+    }
+
+    let mut download_url_endpoint = page_url.clone();
+    download_url_endpoint.set_path(&format!(
+        "{}/download_url",
+        page_url.path().trim_end_matches('/')
+    ));
+    let mut form_data = vec![("csrf_token", csrf.clone())];
+    if let Some(upload_id) = upload_id {
+        form_data.push(("upload_id", upload_id.to_string()));
+    }
+    let request = client
+        .post(download_url_endpoint)
+        .header(header::REFERER, game_url)
+        .header(header::ORIGIN, page_url.origin().ascii_serialization())
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header(header::ACCEPT, "application/json")
+        .form(&form_data);
+    let authorization = request
+        .send()
+        .await
+        .map_err(|error| format!("itch.io could not prepare this download: {error}"))?;
+    if !authorization.status().is_success() {
+        return Err(format!("itch.io refused to prepare this file (HTTP {}). Open the game page to complete any required access or purchase.", authorization.status()));
+    }
+    let result: serde_json::Value = authorization
+        .json()
+        .await
+        .map_err(|error| format!("itch.io returned an invalid download page response: {error}"))?;
+    if let Some(errors) = result.get("errors").and_then(serde_json::Value::as_array) {
+        let details = errors
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Err(if details.is_empty() {
+            "itch.io did not authorize this file. It may require an account, purchase, or browser interaction.".into()
+        } else {
+            format!("itch.io did not authorize this file: {details}")
+        });
+    }
+    let download_page_value = result
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "itch.io did not provide a download page. The file may require browser interaction, an account, or purchase.".to_string())?;
+    if validate_itch_signed_download_url(download_page_value).is_ok() {
+        return Ok(download_page_value.to_string());
+    }
+    let download_page_url = url::Url::parse(download_page_value)
+        .map_err(|error| format!("itch.io returned an invalid download page URL: {error}"))?;
+    validate_itch_page_url(&download_page_url)?;
+    let download_page = client
+        .get(download_page_url.clone())
+        .header(header::REFERER, game_url)
+        .send()
+        .await
+        .map_err(|error| format!("Cannot open the itch.io download page: {error}"))?;
+    if !download_page.status().is_success() {
+        return Err(format!("itch.io returned HTTP {} for the download page. Open the game page to complete any required access.", download_page.status()));
+    }
+    let download_html = download_page
+        .text()
+        .await
+        .map_err(|error| format!("Cannot read the itch.io download page: {error}"))?;
+    let download_upload = parse_itch_game_files(&download_html)?
+        .into_iter()
+        .find(|file| file.file_name == file_name)
+        .ok_or_else(|| {
+            "itch.io did not list the selected file on its download page. Open the game page to complete any required access.".to_string()
+        })?;
+    let upload_id = download_upload
+        .upload_id
+        .ok_or_else(|| "itch.io did not expose an authorized upload for this file.".to_string())?;
+    let download_csrf = parse_csrf_token(&download_html)?.unwrap_or(csrf);
+    let mut file_endpoint = page_url.clone();
+    file_endpoint.set_path(&format!(
+        "{}/file/{upload_id}",
+        page_url.path().trim_end_matches('/')
+    ));
+    file_endpoint.set_query(Some("source=view_game&as_props=1"));
+    let file_response = client
+        .post(file_endpoint)
+        .header(header::REFERER, download_page_url.as_str())
+        .header(
+            header::ORIGIN,
+            download_page_url.origin().ascii_serialization(),
+        )
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header(header::ACCEPT, "application/json")
+        .form(&[("csrf_token", download_csrf)])
+        .send()
+        .await
+        .map_err(|error| format!("itch.io could not authorize the selected file: {error}"))?;
+    if !file_response.status().is_success() {
+        return Err(format!("itch.io refused to authorize this file (HTTP {}). Open the game page to complete any required access or purchase.", file_response.status()));
+    }
+    let result: serde_json::Value = file_response
+        .json()
+        .await
+        .map_err(|error| format!("itch.io returned an invalid file authorization: {error}"))?;
+    if let Some(errors) = result.get("errors").and_then(serde_json::Value::as_array) {
+        let details = errors
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Err(if details.is_empty() {
+            "itch.io did not authorize this file. It may require an account, purchase, or browser interaction.".into()
+        } else {
+            format!("itch.io did not authorize this file: {details}")
+        });
+    }
+    let signed_url = result
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "itch.io did not provide an archive URL. The file may require browser interaction, an account, or purchase.".to_string())?;
+    validate_itch_signed_download_url(signed_url)?;
+    Ok(signed_url.to_string())
+}
+
+fn parse_csrf_token(html: &str) -> Result<Option<String>, String> {
+    let csrf_pattern = Regex::new(
+        r#"(?is)<meta\b[^>]*name=["']csrf_token["'][^>]*(?:content|value)=["']([^"']+)["']|<input\b[^>]*name=["']csrf_token["'][^>]*value=["']([^"']+)["']"#,
+    )
+    .map_err(|error| format!("Cannot prepare itch.io authorization parser: {error}"))?;
+    Ok(csrf_pattern.captures(html).and_then(|capture| {
+        capture
+            .get(1)
+            .or_else(|| capture.get(2))
+            .map(|token| token.as_str().to_string())
+    }))
+}
+
+fn validate_itch_signed_download_url(raw: &str) -> Result<(), String> {
+    let signed_url = url::Url::parse(raw)
+        .map_err(|error| format!("Invalid itch.io signed download URL: {error}"))?;
+    let host = signed_url
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if signed_url.scheme() != "https"
+        || !host.starts_with("itchio-mirror.")
+        || !host.ends_with(".r2.cloudflarestorage.com")
+        || !signed_url.path().starts_with("/upload2/game/")
+    {
+        return Err("itch.io returned an unexpected download host or path.".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -320,7 +796,8 @@ fn list_library(state: State<'_, AppState>) -> Result<Vec<InstalledGame>, String
 
 fn get_transfer_record(db: &Connection, game_id: i64) -> Result<TransferRecord, String> {
     db.query_row(
-        "SELECT game_id,url,archive_path,install_dir,run_after FROM downloads WHERE game_id=?1",
+        "SELECT d.game_id,d.url,d.archive_path,d.install_dir,d.run_after,d.upload_id,g.game_url,d.selected_file_name
+         FROM downloads d JOIN games g ON g.id=d.game_id WHERE d.game_id=?1",
         [game_id],
         |row| {
             Ok(TransferRecord {
@@ -329,6 +806,9 @@ fn get_transfer_record(db: &Connection, game_id: i64) -> Result<TransferRecord, 
                 archive_path: PathBuf::from(row.get::<_, String>(2)?),
                 install_dir: PathBuf::from(row.get::<_, String>(3)?),
                 run_after: row.get::<_, i64>(4)? != 0,
+                upload_id: row.get(5)?,
+                game_url: row.get(6)?,
+                file_name: row.get(7)?,
             })
         },
     )
@@ -366,10 +846,12 @@ fn is_safe_slug(slug: &str) -> bool {
 }
 
 #[tauri::command]
-fn start_download(
+async fn start_download(
     game_id: i64,
     destination: String,
     run_after: bool,
+    upload_id: Option<i64>,
+    file_name: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
@@ -380,29 +862,64 @@ fn start_download(
     let destination = fs::canonicalize(&destination)
         .map_err(|error| format!("Cannot resolve destination folder: {error}"))?;
     let app_state = state.inner().clone();
-    let (url, slug, browser_only) = {
+    let (url, slug, game_url, browser_only, files_json) = {
         let db = app_state.db.lock().map_err(|_| lock_error())?;
-        let (url, slug, browser_only): (Option<String>, String, bool) = db
+        let (url, slug, game_url, browser_only, files_json): (
+            Option<String>,
+            String,
+            String,
+            bool,
+            String,
+        ) = db
             .query_row(
-                "SELECT download_url,slug,browser_only FROM games WHERE id=?1",
+                "SELECT download_url,slug,game_url,browser_only,files_json FROM games WHERE id=?1",
                 [game_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, i64>(3)? != 0,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|error| format!("Cannot load game details: {error}"))?
             .ok_or_else(|| "That game is no longer in the catalog.".to_string())?;
-        (
-            url.ok_or_else(|| {
-                "No verified public download is available for this game yet.".to_string()
-            })?,
-            slug,
-            browser_only,
-        )
+        (url, slug, game_url, browser_only, files_json)
     };
     if browser_only {
         return Err("This title is browser-only and cannot be installed as a desktop game.".into());
     }
-    validate_download_url(&url)?;
+    let file_name = file_name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+    if upload_id.is_some() || file_name.is_some() {
+        validate_itch_page_url(
+            &url::Url::parse(&game_url)
+                .map_err(|error| format!("Invalid itch.io game page URL: {error}"))?,
+        )?;
+        let files: Vec<GameFile> = serde_json::from_str(&files_json)
+            .map_err(|error| format!("Cannot read available itch.io files: {error}"))?;
+        let selected = files
+            .iter()
+            .find(|file| file.installable && file_name.as_deref() == Some(file.file_name.as_str()));
+        if selected.is_none()
+            || upload_id.is_some_and(|id| id <= 0)
+            || upload_id.is_some_and(|id| selected.and_then(|file| file.upload_id) != Some(id))
+        {
+            return Err("Choose a file that was listed on this game's itch.io page.".into());
+        }
+        if file_name.is_none() {
+            return Err("Choose an installable file from this game's itch.io page.".into());
+        }
+    } else {
+        let direct_url = url.as_deref().ok_or_else(|| {
+            "No verified public download is available for this game yet.".to_string()
+        })?;
+        validate_download_url(direct_url)?;
+    }
     if !is_safe_slug(&slug) {
         return Err("This game's install folder name is invalid.".into());
     }
@@ -428,11 +945,19 @@ fn start_download(
     {
         let db = app_state.db.lock().map_err(|_| lock_error())?;
         db.execute(
-            "INSERT INTO downloads (game_id,url,status,bytes_downloaded,total_bytes,archive_path,install_dir,launch_path,run_after,error,updated_at)
-             VALUES (?1,?2,'downloading',0,NULL,?3,?4,NULL,?5,NULL,CURRENT_TIMESTAMP)
-             ON CONFLICT(game_id) DO UPDATE SET url=excluded.url,status='downloading',bytes_downloaded=0,total_bytes=NULL,
+            "INSERT INTO downloads (game_id,url,upload_id,selected_file_name,status,bytes_downloaded,total_bytes,archive_path,install_dir,launch_path,run_after,error,updated_at)
+             VALUES (?1,?2,?3,?4,'downloading',0,NULL,?5,?6,NULL,?7,NULL,CURRENT_TIMESTAMP)
+             ON CONFLICT(game_id) DO UPDATE SET url=excluded.url,upload_id=excluded.upload_id,selected_file_name=excluded.selected_file_name,status='downloading',bytes_downloaded=0,total_bytes=NULL,
                  archive_path=excluded.archive_path,install_dir=excluded.install_dir,launch_path=NULL,run_after=excluded.run_after,error=NULL,updated_at=CURRENT_TIMESTAMP",
-            params![game_id,url,archive_path.to_string_lossy(),install_dir.to_string_lossy(),if run_after { 1_i64 } else { 0_i64 }],
+            params![
+                game_id,
+                url.unwrap_or_default(),
+                upload_id,
+                file_name,
+                archive_path.to_string_lossy(),
+                install_dir.to_string_lossy(),
+                if run_after { 1_i64 } else { 0_i64 }
+            ],
         )
         .map_err(|error| format!("Cannot start download record: {error}"))?;
     }
@@ -582,7 +1107,12 @@ async fn download_and_install(
     record: &TransferRecord,
     control: &TransferControl,
 ) -> Result<(), String> {
-    validate_download_url(&record.url)?;
+    let download_url = if let Some(file_name) = record.file_name.as_deref() {
+        resolve_itch_download(&record.game_url, file_name).await?
+    } else {
+        validate_download_url(&record.url)?;
+        record.url.clone()
+    };
     let client = Client::builder()
         .user_agent(concat!("RedlineLibrary/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
@@ -593,7 +1123,7 @@ async fn download_and_install(
         .await
         .map(|meta| meta.len())
         .unwrap_or(0);
-    let mut request = client.get(&record.url);
+    let mut request = client.get(&download_url);
     if existing > 0 {
         request = request.header(header::RANGE, format!("bytes={existing}-"));
     }
@@ -601,6 +1131,11 @@ async fn download_and_install(
         .send()
         .await
         .map_err(|error| format!("Download failed: {error}"))?;
+    if record.upload_id.is_some() {
+        validate_itch_signed_download_url(response.url().as_str())?;
+    } else {
+        validate_download_url(response.url().as_str())?;
+    }
     let status = response.status();
     if !status.is_success() {
         return Err(format!("Download server returned HTTP {status}."));
@@ -1019,7 +1554,7 @@ mod tests {
                 |row| Ok(row.get::<_, i64>(0)? != 0),
             )
             .unwrap();
-        assert!(browser_only);
+        assert!(!browser_only);
         connection
             .execute(
                 "INSERT INTO downloads (game_id,url,status,archive_path,install_dir) VALUES (1,'https://example.itch.zone/game.zip','downloading','/tmp/a.zip.part','/tmp/a')",
@@ -1050,11 +1585,125 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_previous_database_schema() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE games (
+                    id INTEGER PRIMARY KEY,
+                    slug TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    creator TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    cover_url TEXT NOT NULL,
+                    game_url TEXT NOT NULL,
+                    download_url TEXT,
+                    genre TEXT NOT NULL,
+                    published TEXT NOT NULL,
+                    browser_only INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE downloads (
+                    game_id INTEGER PRIMARY KEY REFERENCES games(id),
+                    url TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER,
+                    archive_path TEXT NOT NULL,
+                    install_dir TEXT NOT NULL,
+                    launch_path TEXT,
+                    run_after INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO games (slug,title,creator,description,cover_url,game_url,genre,published,browser_only)
+                VALUES ('remember','Remember','Laucifer','','https://example.com/cover','https://xlaucifer.itch.io/remember','Visual novel','—',1);
+                ",
+            )
+            .expect("previous schema");
+        initialize_db(&connection).expect("database upgrades");
+        let games = query_games(&connection).expect("upgraded game list");
+        assert_eq!(games.len(), 1);
+        assert!(!games[0].browser_only);
+        assert!(!games[0].browser_playable);
+        assert!(games[0].files.is_empty());
+        let download_columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(downloads)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(download_columns.iter().any(|column| column == "upload_id"));
+        assert!(download_columns
+            .iter()
+            .any(|column| column == "selected_file_name"));
+    }
+
+    #[test]
     fn downloader_accepts_only_https_itch_hosts() {
         assert!(validate_download_url("https://foo.itch.zone/download").is_ok());
         assert!(validate_download_url("https://itch.io/download").is_ok());
         assert!(validate_download_url("http://foo.itch.zone/download").is_err());
         assert!(validate_download_url("https://itch.io.attacker.example/download").is_err());
+    }
+
+    #[test]
+    fn parses_itch_upload_metadata_and_rejects_non_zip_installs() {
+        let html = r#"
+            <div class="upload">
+              <a class="button download_btn" data-upload_id="15231115" href="javascript:void(0);">Download</a>
+              <div class="info_column"><div class="upload_name">
+                <strong title="Tactical Squad.zip" class="name">Tactical Squad.zip</strong>
+                <span class="file_size"><span>119 MB</span></span>
+                <span class="download_platforms"><span title="Download for Windows"></span><span title="Download for Linux"></span></span>
+              </div></div>
+            </div>
+            <div class="upload">
+              <div class="info_column"><div class="upload_name">
+                <strong title="Android build.apk" class="name">Android build.apk</strong>
+                <span class="file_size"><span>125 MB</span></span>
+                <span class="download_platforms"><span title="Download for Android"></span></span>
+              </div></div>
+            </div>
+            <div class="upload">
+              <div class="info_column"><div class="upload_name">
+                <strong title="Windows build.zip" class="name">Windows build.zip</strong>
+                <span class="file_size"><span>45 MB</span></span>
+                <span class="download_platforms"><span title="Download for Windows"></span></span>
+              </div></div>
+            </div>
+        "#;
+        let files = parse_itch_game_files(html).expect("page HTML parses");
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].upload_id, Some(15231115));
+        assert_eq!(files[0].size.as_deref(), Some("119 MB"));
+        assert_eq!(files[0].platforms, ["Windows", "Linux"]);
+        assert_eq!(files[1].upload_id, None);
+        assert!(files[0].installable);
+        assert!(!files[1].installable);
+        assert!(files[2].installable);
+    }
+
+    #[test]
+    fn accepts_only_itch_signed_archive_hosts() {
+        assert!(validate_itch_signed_download_url(
+            "https://itchio-mirror.abc123.r2.cloudflarestorage.com/upload2/game/1/2?X-Amz-Signature=ok"
+        )
+        .is_ok());
+        assert!(
+            validate_itch_signed_download_url("https://attacker.example/upload2/game/1/2").is_err()
+        );
+        assert!(validate_itch_signed_download_url(
+            "https://itchio-mirror.abc123.r2.cloudflarestorage.com/unexpected/path"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn detects_itch_browser_playable_pages() {
+        assert!(page_is_browser_playable(r#"{"type_name": "html"}"#).unwrap());
+        assert!(!page_is_browser_playable(r#"{"type_name": "default"}"#).unwrap());
     }
 
     #[test]
@@ -1149,6 +1798,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_games,
+            refresh_game_files,
             list_downloads,
             list_library,
             start_download,

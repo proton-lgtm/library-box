@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https://*.itch.zone https://*.itch.io data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; script-src 'self'; connect-src ipc: http://ipc.localhost https://*.itch.io https://*.itch.zone"
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https://*.itch.zone https://*.itch.io data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src ipc: http://ipc.localhost https://*.itch.io https://*.itch.zone"
     }
   },
   "bundle": {

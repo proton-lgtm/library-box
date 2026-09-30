@@ -1,5 +1,13 @@
 export type DownloadStatus = "downloading" | "paused" | "cancelled" | "failed" | "installed";
 
+export interface GameFile {
+  uploadId: number | null;
+  fileName: string;
+  size: string | null;
+  platforms: string[];
+  installable: boolean;
+}
+
 export interface Game {
   id: number;
   slug: string;
@@ -13,6 +21,8 @@ export interface Game {
   published: string;
   downloadStatus: DownloadStatus | null;
   browserOnly: boolean;
+  browserPlayable: boolean;
+  files: GameFile[];
 }
 
 export interface Download {

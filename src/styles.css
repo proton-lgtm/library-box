@@ -1,7 +1,5 @@
-@import url("https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800;900&family=DM+Sans:wght@400;500;600;700&display=swap");
-
 :root {
-  font-family: "DM Sans", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: "Segoe UI", sans-serif;
   color: #f5f3f0;
   background: #101011;
   font-synthesis: none;
@@ -14,8 +12,9 @@
 }
 
 * { box-sizing: border-box; }
+h1,h2,h3,h4,h5,h6 { font-family: "Bahnschrift", "Segoe UI", sans-serif; }
 body { margin: 0; min-width: 900px; min-height: 100vh; background: #101011; }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { color: inherit; }
 a { color: inherit; text-decoration: none; }
 button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--red-bright); outline-offset: 3px; }
@@ -52,7 +51,7 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .search-box input { min-width: 0; flex: 1; border: 0; outline: none; color: #eee; background: transparent; font-size: 11px; }
 .search-box input::placeholder { color: #726e6f; }
 .search-box kbd { padding: 3px 5px; border: 1px solid #383536; border-radius: 3px; color: #817d7e; font-size: 9px; }
-.avatar { width: 29px; height: 29px; display: grid; place-items: center; border: 1px solid #6b2529; border-radius: 50%; color: #fff; background: #451b1d; font-family: "Barlow Condensed", sans-serif; font-weight: 800; cursor: pointer; }
+.avatar { width: 29px; height: 29px; display: grid; place-items: center; border: 1px solid #6b2529; border-radius: 50%; color: #fff; background: #451b1d; font-family: "Bahnschrift", "Segoe UI", sans-serif; font-weight: 800; cursor: pointer; }
 .error-banner,.toast-error { display: flex; align-items: center; gap: 9px; margin: 15px 35px 0; padding: 11px 14px; border: 1px solid #73282b; border-radius: 6px; color: #ff9b9e; background: #291516; font-size: 11px; }
 .toast-error { position: fixed; z-index: 30; right: 25px; bottom: 22px; max-width: 480px; margin: 0; box-shadow: 0 12px 40px #0009; }
 .toast-error span { flex: 1; }
@@ -68,7 +67,7 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .hero-content { position: absolute; top: 53px; left: 48px; max-width: 520px; }
 .eyebrow { display: flex; align-items: center; gap: 8px; color: #f3dfe0; font-size: 9px; font-weight: 700; letter-spacing: .18em; }
 .hero-separator { color: #8a7778; }
-.hero h1,.detail-info h1,.page-title-row h1 { margin: 15px 0 8px; font-family: "Barlow Condensed", Impact, sans-serif; font-size: clamp(38px,5vw,64px); line-height: .96; font-weight: 800; letter-spacing: .015em; text-transform: uppercase; text-shadow: 0 2px 18px #0008; }
+.hero h1,.detail-info h1,.page-title-row h1 { margin: 15px 0 8px; font-family: "Bahnschrift", "Segoe UI", sans-serif; font-size: clamp(38px,5vw,64px); line-height: .96; font-weight: 800; letter-spacing: .015em; text-transform: uppercase; text-shadow: 0 2px 18px #0008; }
 .hero-content p { max-width: 405px; margin: 13px 0 20px; color: #c3babb; font-size: 12px; line-height: 1.7; }
 .hero-actions,.detail-actions { display: flex; align-items: center; gap: 18px; }
 .button-primary,.button-secondary,.button-play,.button-stop { min-height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; padding: 0 15px; border: 1px solid transparent; border-radius: 5px; font-size: 9px; font-weight: 800; letter-spacing: .11em; cursor: pointer; transition: .16s ease; }
@@ -88,8 +87,8 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .game-section { margin-top: 33px; }
 .section-heading { display: flex; justify-content: space-between; align-items: end; margin-bottom: 17px; }
 .eyebrow.muted { color: #817b7c; font-size: 8px; letter-spacing: .2em; }
-.section-heading h2 { margin: 6px 0 0; color: #f3eeee; font-family: "Barlow Condensed", Impact, sans-serif; font-size: 25px; font-weight: 700; letter-spacing: .03em; }
-.section-count { margin-left: 5px; color: #8b8586; font: 500 11px "DM Sans", sans-serif; vertical-align: middle; }
+.section-heading h2 { margin: 6px 0 0; color: #f3eeee; font-family: "Bahnschrift", "Segoe UI", sans-serif; font-size: 25px; font-weight: 700; letter-spacing: .03em; }
+.section-count { margin-left: 5px; color: #8b8586; font: 500 11px "Segoe UI", sans-serif; vertical-align: middle; }
 .section-tools { display: flex; align-items: center; gap: 8px; padding-bottom: 4px; color: #8e8889; font-size: 8px; font-weight: 700; letter-spacing: .14em; }
 .sort-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--red); }
 .game-grid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 18px 14px; }
@@ -138,6 +137,10 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .detail-source { display: flex; gap: 17px; margin-top: 35px; padding-top: 14px; border-top: 1px solid #2e2a2b; color: #756f70; font-size: 9px; }
 .detail-source > span { font-weight: 700; letter-spacing: .12em; }
 .detail-source button { display: flex; align-items: center; gap: 6px; padding: 0; border: 0; background: transparent; color: #bdb5b6; font: inherit; cursor: pointer; }
+.available-files { display: grid; gap: 7px; max-width: 580px; margin: 0 0 16px; }
+.available-file { display: flex; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid #302c2d; border-radius: 4px; color: #d6d0d1; background: #191718; font-size: 10px; }
+.available-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.available-file strong { flex-shrink: 0; color: #a69d9e; font-size: 9px; font-weight: 500; }
 
 .page-title-row { display: flex; align-items: center; justify-content: space-between; margin: 17px 0 28px; }
 .page-title-row h1 { margin: 9px 0 6px; font-size: 45px; }
@@ -186,7 +189,8 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .download-modal { position: relative; width: min(500px,100%); padding: 28px; border: 1px solid #4a3234; border-radius: 9px; background: #191718; box-shadow: 0 24px 90px #000b; }
 .modal-close { position: absolute; top: 15px; right: 15px; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid #3b3536; border-radius: 5px; color: #aaa2a3; background: #211f20; cursor: pointer; }
 .modal-icon { width: 39px; height: 39px; display: grid; place-items: center; margin-bottom: 19px; border: 1px solid #6d282c; border-radius: 7px; color: #ff555b; background: #321719; }
-.download-modal h2 { margin: 8px 0; font-family: "Barlow Condensed", Impact, sans-serif; font-size: 30px; text-transform: uppercase; }
+.download-modal h2 { margin: 8px 0; font-family: "Bahnschrift", "Segoe UI", sans-serif; font-size: 30px; text-transform: uppercase; }
+.file-picker { width: 100%; min-height: 40px; margin-bottom: 15px; padding: 7px 10px; border: 1px solid #393536; border-radius: 5px; color: #ddd; background: #111011; font-size: 10px; }
 .modal-copy { margin: 0 0 21px; color: #a9a1a2; font-size: 11px; line-height: 1.7; }
 .field-label { display: block; margin-bottom: 7px; color: #8c8384; font-size: 8px; font-weight: 700; letter-spacing: .14em; }
 .folder-picker { min-height: 42px; display: flex; align-items: center; gap: 10px; padding: 4px 5px 4px 11px; border: 1px solid #393536; border-radius: 5px; background: #111011; }
