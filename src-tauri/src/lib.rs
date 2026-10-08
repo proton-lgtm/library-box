@@ -127,7 +127,6 @@ struct TransferRecord {
     game_id: i64,
     url: String,
     game_url: String,
-    upload_id: Option<i64>,
     file_name: Option<String>,
     archive_path: PathBuf,
     install_dir: PathBuf,
@@ -254,32 +253,27 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("Cannot upgrade library database: {error}"))?;
     }
-    let count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM games", [], |row| row.get(0))
-        .map_err(|error| format!("Cannot read game catalog: {error}"))?;
-    if count == 0 {
-        let seeds: Vec<CatalogSeed> = serde_json::from_str(include_str!("catalog.json"))
-            .map_err(|error| format!("Bundled game catalog is invalid: {error}"))?;
-        for seed in seeds {
-            connection
-                .execute(
-                    "INSERT INTO games (slug,title,creator,description,cover_url,game_url,download_url,genre,published,browser_only)
+    let seeds: Vec<CatalogSeed> = serde_json::from_str(include_str!("catalog.json"))
+        .map_err(|error| format!("Bundled game catalog is invalid: {error}"))?;
+    for seed in seeds {
+        connection
+            .execute(
+                    "INSERT OR IGNORE INTO games (slug,title,creator,description,cover_url,game_url,download_url,genre,published,browser_only)
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                    params![
-                        seed.slug,
-                        seed.title,
-                        seed.creator,
-                        seed.description,
-                        seed.cover_url,
-                        seed.game_url,
-                        seed.download_url,
-                        seed.genre,
-                        seed.published,
-                        if seed.browser_only { 1_i64 } else { 0_i64 }
-                    ],
-                )
-                .map_err(|error| format!("Cannot seed game catalog: {error}"))?;
-        }
+                params![
+                    seed.slug,
+                    seed.title,
+                    seed.creator,
+                    seed.description,
+                    seed.cover_url,
+                    seed.game_url,
+                    seed.download_url,
+                    seed.genre,
+                    seed.published,
+                    if seed.browser_only { 1_i64 } else { 0_i64 }
+                ],
+            )
+            .map_err(|error| format!("Cannot seed game catalog: {error}"))?;
     }
     Ok(())
 }
@@ -367,8 +361,10 @@ fn parse_itch_game_files(html: &str) -> Result<Vec<GameFile>, String> {
             .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
     let upload_id_pattern = Regex::new(r#"data-upload_id=["'](\d+)["']"#)
         .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
-    let name_pattern = Regex::new(r#"(?is)<strong\b[^>]*\btitle=["']([^"']+)["'][^>]*>"#)
-        .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
+    let name_pattern = Regex::new(
+        r#"(?is)<strong\b[^>]*\bclass=["'][^"']*\bname\b[^"']*["'][^>]*>(.*?)</strong>"#,
+    )
+    .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
     let size_pattern =
         Regex::new(r#"(?is)class=["'][^"']*\bfile_size\b[^"']*["'][^>]*>\s*<span[^>]*>\s*([^<]+)"#)
             .map_err(|error| format!("Cannot prepare itch.io file parser: {error}"))?;
@@ -387,7 +383,8 @@ fn parse_itch_game_files(html: &str) -> Result<Vec<GameFile>, String> {
         let Some(file_name) = name_pattern
             .captures(block)
             .and_then(|capture| capture.get(1))
-            .map(|capture| decode_html_text(capture.as_str()))
+            .map(|capture| decode_html_text(capture.as_str()).trim().to_string())
+            .filter(|name| !name.is_empty())
         else {
             continue;
         };
@@ -796,7 +793,7 @@ fn list_library(state: State<'_, AppState>) -> Result<Vec<InstalledGame>, String
 
 fn get_transfer_record(db: &Connection, game_id: i64) -> Result<TransferRecord, String> {
     db.query_row(
-        "SELECT d.game_id,d.url,d.archive_path,d.install_dir,d.run_after,d.upload_id,g.game_url,d.selected_file_name
+        "SELECT d.game_id,d.url,d.archive_path,d.install_dir,d.run_after,g.game_url,d.selected_file_name
          FROM downloads d JOIN games g ON g.id=d.game_id WHERE d.game_id=?1",
         [game_id],
         |row| {
@@ -806,9 +803,8 @@ fn get_transfer_record(db: &Connection, game_id: i64) -> Result<TransferRecord, 
                 archive_path: PathBuf::from(row.get::<_, String>(2)?),
                 install_dir: PathBuf::from(row.get::<_, String>(3)?),
                 run_after: row.get::<_, i64>(4)? != 0,
-                upload_id: row.get(5)?,
-                game_url: row.get(6)?,
-                file_name: row.get(7)?,
+                game_url: row.get(5)?,
+                file_name: row.get(6)?,
             })
         },
     )
@@ -836,6 +832,17 @@ fn validate_download_url(raw: &str) -> Result<(), String> {
         return Err("Downloads are only allowed from HTTPS itch.io and itch.zone URLs.".into());
     }
     Ok(())
+}
+
+fn validate_download_response_url(
+    raw: &str,
+    selected_file_name: Option<&str>,
+) -> Result<(), String> {
+    if selected_file_name.is_some() {
+        validate_itch_signed_download_url(raw)
+    } else {
+        validate_download_url(raw)
+    }
 }
 
 fn is_safe_slug(slug: &str) -> bool {
@@ -1131,11 +1138,7 @@ async fn download_and_install(
         .send()
         .await
         .map_err(|error| format!("Download failed: {error}"))?;
-    if record.upload_id.is_some() {
-        validate_itch_signed_download_url(response.url().as_str())?;
-    } else {
-        validate_download_url(response.url().as_str())?;
-    }
+    validate_download_response_url(response.url().as_str(), record.file_name.as_deref())?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("Download server returned HTTP {status}."));
@@ -1545,7 +1548,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM games", [], |row| row.get(0))
             .unwrap();
         let seeds = serde_json::from_str::<Vec<CatalogSeed>>(include_str!("catalog.json")).unwrap();
-        assert_eq!(count, 10);
+        assert_eq!(count, 11);
         assert_eq!(count as usize, seeds.len());
         let browser_only: bool = connection
             .query_row(
@@ -1582,6 +1585,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "cancelled");
+    }
+
+    #[test]
+    fn adds_new_catalog_entries_to_an_existing_database() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        initialize_db(&connection).expect("initial catalog");
+        connection
+            .execute("DELETE FROM games WHERE slug='stillwater'", [])
+            .expect("simulate an older catalog");
+
+        initialize_db(&connection).expect("catalog update");
+        let game = query_games(&connection)
+            .expect("updated catalog")
+            .into_iter()
+            .find(|game| game.slug == "stillwater")
+            .expect("Stillwater is added to the existing catalog");
+        assert_eq!(game.game_url, "https://studioclump.itch.io/stillwater");
     }
 
     #[test]
@@ -1649,6 +1669,13 @@ mod tests {
     }
 
     #[test]
+    fn validates_signed_archive_for_selected_file_without_public_upload_id() {
+        let archive_url = "https://itchio-mirror.abc123.r2.cloudflarestorage.com/upload2/game/1/2?X-Amz-Signature=ok";
+        assert!(validate_download_response_url(archive_url, Some("Remember.zip")).is_ok());
+        assert!(validate_download_response_url(archive_url, None).is_err());
+    }
+
+    #[test]
     fn parses_itch_upload_metadata_and_rejects_non_zip_installs() {
         let html = r#"
             <div class="upload">
@@ -1668,7 +1695,7 @@ mod tests {
             </div>
             <div class="upload">
               <div class="info_column"><div class="upload_name">
-                <strong title="Windows build.zip" class="name">Windows build.zip</strong>
+                                <strong class="name">Windows build.zip</strong>
                 <span class="file_size"><span>45 MB</span></span>
                 <span class="download_platforms"><span title="Download for Windows"></span></span>
               </div></div>
