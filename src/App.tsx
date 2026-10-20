@@ -29,6 +29,7 @@ import type { Download as DownloadItem, DownloadProgress as ProgressEvent, Game,
 import { formatBytes as prettySize } from "./utils";
 
 type Page = "home" | "library" | "downloads";
+const LAST_INSTALL_FOLDER_KEY = "redline.last-install-folder";
 
 function Cover({
   src,
@@ -67,7 +68,7 @@ function App() {
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
   const [modalGame, setModalGame] = useState<Game | null>(null);
-  const [folder, setFolder] = useState("");
+  const [folder, setFolder] = useState(() => localStorage.getItem(LAST_INSTALL_FOLDER_KEY) ?? "");
   const [runAfter, setRunAfter] = useState(false);
   const [starting, setStarting] = useState(false);
   const [filesLoading, setFilesLoading] = useState(false);
@@ -75,10 +76,10 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [nextGames, nextDownloads, nextLibrary] = await Promise.all([
+      const nextLibrary = await invoke<InstalledGame[]>("list_library");
+      const [nextGames, nextDownloads] = await Promise.all([
         invoke<Game[]>("list_games"),
         invoke<DownloadItem[]>("list_downloads"),
-        invoke<InstalledGame[]>("list_library"),
       ]);
       setGames(nextGames);
       setDownloads(nextDownloads);
@@ -93,6 +94,9 @@ function App() {
 
   useEffect(() => {
     void refresh();
+  }, [page, refresh]);
+
+  useEffect(() => {
     const timer = window.setInterval(() => void refresh(), 3000);
     let active = true;
     let unlisten: (() => void) | undefined;
@@ -124,6 +128,10 @@ function App() {
   }, [refresh]);
 
   useEffect(() => {
+    if (folder) localStorage.setItem(LAST_INSTALL_FOLDER_KEY, folder);
+  }, [folder]);
+
+  useEffect(() => {
     if (!selected) return;
     let active = true;
     setFilesLoading(true);
@@ -152,7 +160,9 @@ function App() {
     );
   }, [games, query]);
 
+  const installedGameIds = useMemo(() => new Set(library.map((game) => game.gameId)), [library]);
   const topGame = selected ?? games[0];
+  const selectedInstalled = selected !== null && installedGameIds.has(selected.id);
   const installableFiles = selected?.files.filter((file) => file.installable) ?? [];
   const modalInstallableFiles = modalGame?.files.filter((file) => file.installable) ?? [];
   const activeCount = downloads.filter((item) =>
@@ -179,7 +189,6 @@ function App() {
         uploadId: modalGame.files.find((file) => file.fileName === selectedFileName)?.uploadId ?? null,
       });
       setModalGame(null);
-      setFolder("");
       setRunAfter(false);
       setSelected(null);
       setPage("downloads");
@@ -271,15 +280,17 @@ function App() {
                 <div className="meta-row"><span>{selected.genre || "Visual Novel"}</span><span>{selected.published || "itch.io"}</span><span>REN’PY</span>{selected.browserPlayable && <span>BROWSER PLAY</span>}</div>
                 <p className="detail-description">{selected.description || "A story-driven game made with Ren'Py. Visit its itch.io page for full details, screenshots, and creator information."}</p>
                 <div className="detail-actions">
-                  <button className="button-primary" disabled={filesLoading} onClick={() => {
+                  <button className="button-primary" disabled={filesLoading && !selectedInstalled} onClick={() => {
                     setActionError("");
-                    if ((installableFiles.length > 0 || selected.downloadUrl) && !selected.browserOnly) {
+                    if (selectedInstalled) {
+                      void report(invoke("launch_game", { gameId: selected.id }));
+                    } else if ((installableFiles.length > 0 || selected.downloadUrl) && !selected.browserOnly) {
                       setModalGame(selected);
                     } else {
                       void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)));
                     }
                   }}>
-                    <Download size={18} /> {filesLoading ? "CHECKING DOWNLOADS..." : selected.downloadStatus === "installed" ? "INSTALL ANOTHER COPY" : (installableFiles.length > 0 || selected.downloadUrl) && !selected.browserOnly ? "DOWNLOAD GAME" : selected.browserOnly ? "PLAY IN BROWSER" : "OPEN ON ITCH.IO"}
+                    {selectedInstalled ? <Play size={18} fill="currentColor" /> : <Download size={18} />} {filesLoading && !selectedInstalled ? "CHECKING DOWNLOADS..." : selectedInstalled ? "PLAY" : (installableFiles.length > 0 || selected.downloadUrl) && !selected.browserOnly ? "DOWNLOAD GAME" : selected.browserOnly ? "PLAY IN BROWSER" : "OPEN ON ITCH.IO"}
                   </button>
                   <button className="button-secondary" onClick={() => void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)))}>{selected.browserPlayable ? "PLAY IN BROWSER" : "VIEW ON ITCH.IO"} <ArrowUpRight size={16} /></button>
                 </div>
@@ -291,7 +302,7 @@ function App() {
                 </div>}
                 {!filesLoading && selected.files.length > 0 && installableFiles.length === 0 && <p className="hint-text">itch.io lists these files, but none is publicly available to Redline as an installable archive for this computer. Open itch.io to complete any required access or choose another version.</p>}
                 {!filesLoading && selected.files.length === 0 && !selected.downloadUrl && <p className="hint-text">{selected.browserOnly ? "This entry is browser-only and has no desktop archive. Open itch.io to play it in your browser." : "The public game page did not expose a downloadable file. Open itch.io to check for browser play, restricted downloads, or creator updates."}</p>}
-                {selected.downloadStatus === "installed" && <div className="installed-note"><Check size={16} /> In your library</div>}
+                {selectedInstalled && <div className="installed-note"><Check size={16} /> In your library</div>}
               </div>
             </div>
             <div className="detail-source"><span>LISTING SOURCE</span><button onClick={() => void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)))}>{selected.gameUrl} <ArrowUpRight size={14} /></button></div>
@@ -327,7 +338,7 @@ function App() {
                       <div className="card-cover-wrap">
                         <Cover src={game.coverUrl} title={game.title} className="card-cover" />
                         <span className="rank-tag">{String(i + 1).padStart(2, "0")}</span>
-                        {game.downloadStatus === "installed" && <span className="owned-tag"><Check size={12} /> IN LIBRARY</span>}
+                        {installedGameIds.has(game.id) && <span className="owned-tag"><Check size={12} /> IN LIBRARY</span>}
                         <span className="card-open"><ChevronRight size={19} /></span>
                       </div>
                       <div className="card-meta"><div className="card-title">{game.title}</div><div className="card-creator">{game.creator} <span>•</span> {game.genre || "Visual Novel"}</div></div>

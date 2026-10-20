@@ -167,7 +167,8 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
                 published TEXT NOT NULL,
                 browser_only INTEGER NOT NULL DEFAULT 0,
                 browser_playable INTEGER NOT NULL DEFAULT 0,
-                files_json TEXT NOT NULL DEFAULT '[]'
+                files_json TEXT NOT NULL DEFAULT '[]',
+                catalog_visible INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS downloads (
                 game_id INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
@@ -221,6 +222,14 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("Cannot upgrade library database: {error}"))?;
     }
+    if !columns.iter().any(|name| name == "catalog_visible") {
+        connection
+            .execute(
+                "ALTER TABLE games ADD COLUMN catalog_visible INTEGER NOT NULL DEFAULT 1",
+                [],
+            )
+            .map_err(|error| format!("Cannot upgrade library database: {error}"))?;
+    }
     connection
         .execute("UPDATE games SET browser_only=0 WHERE slug='remember'", [])
         .map_err(|error| {
@@ -253,13 +262,27 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("Cannot upgrade library database: {error}"))?;
     }
+    connection
+        .execute("UPDATE games SET catalog_visible=0", [])
+        .map_err(|error| format!("Cannot refresh game catalog visibility: {error}"))?;
     let seeds: Vec<CatalogSeed> = serde_json::from_str(include_str!("catalog.json"))
         .map_err(|error| format!("Bundled game catalog is invalid: {error}"))?;
     for seed in seeds {
         connection
             .execute(
-                    "INSERT OR IGNORE INTO games (slug,title,creator,description,cover_url,game_url,download_url,genre,published,browser_only)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                "INSERT INTO games (slug,title,creator,description,cover_url,game_url,download_url,genre,published,browser_only)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                 ON CONFLICT(slug) DO UPDATE SET
+                    title=excluded.title,
+                    creator=excluded.creator,
+                    description=excluded.description,
+                    cover_url=excluded.cover_url,
+                    game_url=excluded.game_url,
+                    download_url=excluded.download_url,
+                    genre=excluded.genre,
+                    published=excluded.published,
+                    browser_only=excluded.browser_only,
+                    catalog_visible=1",
                 params![
                     seed.slug,
                     seed.title,
@@ -282,7 +305,8 @@ fn query_games(connection: &Connection) -> Result<Vec<Game>, String> {
     let mut statement = connection
         .prepare(
             "SELECT g.id,g.slug,g.title,g.creator,g.description,g.cover_url,g.game_url,g.download_url,g.genre,g.published,d.status,g.browser_only,g.browser_playable,g.files_json
-             FROM games g LEFT JOIN downloads d ON d.game_id=g.id ORDER BY g.id",
+             FROM games g LEFT JOIN downloads d ON d.game_id=g.id
+             WHERE g.catalog_visible=1 ORDER BY g.id",
         )
         .map_err(|error| format!("Cannot query games: {error}"))?;
     let result = statement
@@ -744,8 +768,49 @@ fn list_downloads(state: State<'_, AppState>) -> Result<Vec<Download>, String> {
     Ok(downloads)
 }
 
+fn reconcile_installed_games(connection: &Connection) -> Result<(), String> {
+    let installed = {
+        let mut statement = connection
+            .prepare(
+                "SELECT game_id,install_dir,launch_path FROM downloads WHERE status='installed'",
+            )
+            .map_err(|error| format!("Cannot inspect installed games: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    PathBuf::from(row.get::<_, String>(1)?),
+                    row.get::<_, Option<String>>(2)?.map(PathBuf::from),
+                ))
+            })
+            .map_err(|error| format!("Cannot inspect installed games: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Cannot inspect installed games: {error}"))?;
+        rows
+    };
+
+    for (game_id, install_dir, launch_path) in installed {
+        let available = launch_path
+            .as_deref()
+            .is_some_and(|path| validate_launch_path(&install_dir, path).is_ok());
+        if !available {
+            connection
+                .execute(
+                    "UPDATE downloads SET status='failed',error='Game files are missing or unavailable. Download the game again to reinstall it.',updated_at=CURRENT_TIMESTAMP WHERE game_id=?1 AND status='installed'",
+                    [game_id],
+                )
+                .map_err(|error| format!("Cannot refresh installed game status: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn list_library(state: State<'_, AppState>) -> Result<Vec<InstalledGame>, String> {
+    {
+        let db = state.db.lock().map_err(|_| lock_error())?;
+        reconcile_installed_games(&db)?;
+    }
     let mut running = state.running.lock().map_err(|_| lock_error())?;
     let mut running_ids = Vec::new();
     for (game_id, child) in running.iter_mut() {
@@ -942,7 +1007,24 @@ async fn start_download(
         .join("downloads");
     fs::create_dir_all(&cache_dir)
         .map_err(|error| format!("Cannot create download cache: {error}"))?;
-    let archive_path = cache_dir.join(format!("{game_id}.zip.part"));
+    let completed_archive_path = cache_dir.join(format!("{game_id}.zip.zip"));
+    let cached_archive_size = {
+        let db = app_state.db.lock().map_err(|_| lock_error())?;
+        get_transfer_record(&db, game_id)
+            .ok()
+            .filter(|previous| {
+                previous.file_name.as_deref() == file_name.as_deref()
+                    && previous.archive_path == completed_archive_path
+            })
+            .and_then(|_| fs::metadata(&completed_archive_path).ok())
+            .filter(|metadata| metadata.is_file() && metadata.len() > 0)
+            .map(|metadata| metadata.len())
+    };
+    let archive_path = if cached_archive_size.is_some() {
+        completed_archive_path
+    } else {
+        cache_dir.join(format!("{game_id}.zip.part"))
+    };
     if install_dir.exists() {
         return Err(format!(
             "The install folder already exists: {}",
@@ -953,14 +1035,16 @@ async fn start_download(
         let db = app_state.db.lock().map_err(|_| lock_error())?;
         db.execute(
             "INSERT INTO downloads (game_id,url,upload_id,selected_file_name,status,bytes_downloaded,total_bytes,archive_path,install_dir,launch_path,run_after,error,updated_at)
-             VALUES (?1,?2,?3,?4,'downloading',0,NULL,?5,?6,NULL,?7,NULL,CURRENT_TIMESTAMP)
-             ON CONFLICT(game_id) DO UPDATE SET url=excluded.url,upload_id=excluded.upload_id,selected_file_name=excluded.selected_file_name,status='downloading',bytes_downloaded=0,total_bytes=NULL,
+             VALUES (?1,?2,?3,?4,'downloading',?5,?6,?7,?8,NULL,?9,NULL,CURRENT_TIMESTAMP)
+             ON CONFLICT(game_id) DO UPDATE SET url=excluded.url,upload_id=excluded.upload_id,selected_file_name=excluded.selected_file_name,status='downloading',bytes_downloaded=excluded.bytes_downloaded,total_bytes=excluded.total_bytes,
                  archive_path=excluded.archive_path,install_dir=excluded.install_dir,launch_path=NULL,run_after=excluded.run_after,error=NULL,updated_at=CURRENT_TIMESTAMP",
             params![
                 game_id,
                 url.unwrap_or_default(),
                 upload_id,
                 file_name,
+                cached_archive_size.unwrap_or(0) as i64,
+                cached_archive_size.map(|size| size as i64),
                 archive_path.to_string_lossy(),
                 install_dir.to_string_lossy(),
                 if run_after { 1_i64 } else { 0_i64 }
@@ -1114,6 +1198,31 @@ async fn download_and_install(
     record: &TransferRecord,
     control: &TransferControl,
 ) -> Result<(), String> {
+    if record.archive_path.is_file()
+        && record
+            .archive_path
+            .extension()
+            .is_some_and(|extension| extension != "part")
+    {
+        let downloaded = tokio::fs::metadata(&record.archive_path)
+            .await
+            .map_err(|error| format!("Cannot inspect cached archive: {error}"))?
+            .len();
+        if downloaded == 0 {
+            return Err("The cached game archive is empty; start a fresh download.".into());
+        }
+        emit_download(
+            app,
+            record.game_id,
+            "downloading",
+            Some(downloaded),
+            Some(downloaded),
+            None,
+        );
+        return install_archive(state, app, record, control, record.archive_path.clone(), downloaded)
+            .await;
+    }
+
     let download_url = if let Some(file_name) = record.file_name.as_deref() {
         resolve_itch_download(&record.game_url, file_name).await?
     } else {
@@ -1215,20 +1324,43 @@ async fn download_and_install(
         emit_download(app, record.game_id, "cancelled", None, None, None);
         return Ok(());
     }
-    let archive_path = record.archive_path.clone();
-    let final_path = record.archive_path.with_extension("zip");
+    install_archive(
+        state,
+        app,
+        record,
+        control,
+        record.archive_path.clone(),
+        downloaded,
+    )
+    .await
+}
+
+async fn install_archive(
+    state: &AppState,
+    app: &AppHandle,
+    record: &TransferRecord,
+    control: &TransferControl,
+    archive_path: PathBuf,
+    downloaded: u64,
+) -> Result<(), String> {
+    let final_path = archive_path.with_extension("zip");
+    let archive_path_for_install = archive_path.clone();
     let final_path_for_install = final_path.clone();
     let install_dir = record.install_dir.clone();
     let launch_path = tokio::task::spawn_blocking(move || {
-        fs::rename(&archive_path, &final_path_for_install)
-            .map_err(|error| format!("Cannot finalize downloaded archive: {error}"))?;
+        if archive_path_for_install != final_path_for_install {
+            fs::rename(&archive_path_for_install, &final_path_for_install)
+                .map_err(|error| format!("Cannot finalize downloaded archive: {error}"))?;
+        }
         extract_archive(&final_path_for_install, &install_dir)
     })
     .await
     .map_err(|error| format!("Installer task failed: {error}"))??;
     if control.cancelled.load(Ordering::SeqCst) {
         let _ = fs::remove_dir_all(&record.install_dir);
-        let _ = fs::remove_file(&final_path);
+        if archive_path != final_path {
+            let _ = fs::remove_file(&final_path);
+        }
         emit_download(app, record.game_id, "cancelled", None, None, None);
         return Ok(());
     }
@@ -1545,14 +1677,17 @@ mod tests {
         let connection = Connection::open_in_memory().expect("in-memory database");
         initialize_db(&connection).expect("schema and catalog");
         let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM games", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM games WHERE catalog_visible=1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         let seeds = serde_json::from_str::<Vec<CatalogSeed>>(include_str!("catalog.json")).unwrap();
-        assert_eq!(count, 11);
         assert_eq!(count as usize, seeds.len());
         let browser_only: bool = connection
             .query_row(
-                "SELECT browser_only FROM games WHERE slug='remember'",
+                "SELECT browser_only FROM games WHERE slug='stillwater'",
                 [],
                 |row| Ok(row.get::<_, i64>(0)? != 0),
             )
@@ -1594,14 +1729,77 @@ mod tests {
         connection
             .execute("DELETE FROM games WHERE slug='stillwater'", [])
             .expect("simulate an older catalog");
+        connection
+            .execute(
+                "INSERT INTO games (slug,title,creator,description,cover_url,game_url,genre,published) VALUES ('custom-game','Custom game','Creator','','https://example.com/cover','https://creator.itch.io/custom-game','Visual novel','—')",
+                [],
+            )
+            .expect("existing user catalog entry");
 
         initialize_db(&connection).expect("catalog update");
-        let game = query_games(&connection)
-            .expect("updated catalog")
-            .into_iter()
+        let games = query_games(&connection).expect("updated catalog");
+        let game = games
+            .iter()
             .find(|game| game.slug == "stillwater")
             .expect("Stillwater is added to the existing catalog");
         assert_eq!(game.game_url, "https://studioclump.itch.io/stillwater");
+        assert!(!games.iter().any(|game| game.slug == "custom-game"));
+        let custom_visible: i64 = connection
+            .query_row(
+                "SELECT catalog_visible FROM games WHERE slug='custom-game'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved user database row");
+        assert_eq!(custom_visible, 0);
+    }
+
+    #[test]
+    fn refreshes_catalog_fields_for_existing_games() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        initialize_db(&connection).expect("initial catalog");
+        connection
+            .execute("UPDATE games SET title='Old title' WHERE slug='stillwater'", [])
+            .expect("make seed data stale");
+
+        initialize_db(&connection).expect("catalog update");
+        let title: String = connection
+            .query_row(
+                "SELECT title FROM games WHERE slug='stillwater'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("refreshed title");
+        assert_eq!(title, "Stillwater");
+    }
+
+    #[test]
+    fn marks_missing_installs_as_reinstallable() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        initialize_db(&connection).expect("schema and catalog");
+        let missing_dir = std::env::temp_dir()
+            .join(format!("redline-missing-install-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&missing_dir);
+        connection
+            .execute(
+                "INSERT INTO downloads (game_id,url,status,archive_path,install_dir,launch_path) VALUES (1,'https://example.itch.zone/game.zip','installed','/tmp/game.zip',?1,?2)",
+                params![
+                    missing_dir.to_string_lossy().to_string(),
+                    missing_dir.join("game.exe").to_string_lossy().to_string()
+                ],
+            )
+            .expect("installed game record");
+
+        reconcile_installed_games(&connection).expect("reconcile missing install");
+        let (status, error): (String, Option<String>) = connection
+            .query_row(
+                "SELECT status,error FROM downloads WHERE game_id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("refreshed install status");
+        assert_eq!(status, "failed");
+        assert!(error.unwrap().contains("missing or unavailable"));
     }
 
     #[test]
@@ -1644,9 +1842,15 @@ mod tests {
         initialize_db(&connection).expect("database upgrades");
         let games = query_games(&connection).expect("upgraded game list");
         assert_eq!(games.len(), 1);
-        assert!(!games[0].browser_only);
-        assert!(!games[0].browser_playable);
-        assert!(games[0].files.is_empty());
+        assert_eq!(games[0].slug, "stillwater");
+        let remember_browser_only: i64 = connection
+            .query_row(
+                "SELECT browser_only FROM games WHERE slug='remember'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved installed game record");
+        assert_eq!(remember_browser_only, 0);
         let download_columns: Vec<String> = connection
             .prepare("PRAGMA table_info(downloads)")
             .unwrap()

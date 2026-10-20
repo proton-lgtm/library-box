@@ -10,5 +10,17 @@
     "genre": "Visual novel",
     "published": "Remastered Dec 2023",
     "browser_only": false
+  },
+  {
+    "slug": "test-0",
+    "title": "Test 0",
+    "creator": "Test Creator",
+    "description": "This is a test game for the catalog.",
+    "cover_url": "https://learningessentialsedu.com/wp-content/uploads/2016/10/board-361516_1280.jpg",
+    "game_url": "https://testcreator.itch.io/test-0",
+    "download_url": "https://pixeldrain.com/u/BxuLDvJG",
+    "genre": "Test",
+    "published": "Jan 2024",
+    "browser_only": false
   }
 ]
