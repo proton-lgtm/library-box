@@ -26,7 +26,7 @@ class ModManager:
 
             # Prefer direct file links over file-host share pages.
             download_url = None
-            for source in ['pixeldrain', 'patreon', 'mixdrop', 'direct']:
+            for source in ['pixeldrain', 'workupload', 'patreon', 'mixdrop', 'direct']:
                 if source in download_links:
                     download_url = download_links[source]
                     break

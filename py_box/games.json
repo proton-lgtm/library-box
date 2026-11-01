@@ -1,35 +1,74 @@
-[{
-    "name": "Game 01",
-    "thumbnail": "https://attachments.f95zone.to/2026/08/6367911_1786469712398.png",
-    "download_links": {
-        "pixeldrain": "https://pixeldrain.com/u/rNN48Qfi"
+[
+    {
+        "name": "Game 01",
+        "download_links": {
+            "pixeldrain": "https://pixeldrain.com/u/rNN48Qfi"
+        },
+        "mods": [
+            {
+                "name": "Walkthrough Mod",
+                "download_links": {
+                    "mixdrop": "https://mixdrop.top/f/677dldnof6zzk3",
+                    "patreon": "https://www.patreon.com/file?h=166410526&m=771311332"
+                },
+                "steps_to_apply": [
+                    {
+                        "type": "extract",
+                        "target_folder": "."
+                    },
+                    {
+                        "type": "move",
+                        "source_folder": "./DEAR-0.3-Joker WT Mod/Optional/game",
+                        "target_folder": "%GAME_ROOT%/DEAR-0.3-pc/game"
+                    }
+                ]
+            }
+        ]
     },
-    "mods": [
-        {
-            "name": "Walkthrough Mod",
-            "download_links": {
-                "mixdrop": "https://mixdrop.top/f/677dldnof6zzk3",
-                "patreon": "https://www.patreon.com/file?h=166410526&m=771311332"
+    {
+        "name": "Game 02",
+        "download_links": {
+            "pixeldrain": "https://pixeldrain.com/u/iBsrkcMx"
+        },
+        "mods": []
+    },
+    {
+        "name": "Game 03",
+        "download_links": {
+            "workupload": "https://workupload.com/file/PXX9FnqHYeE"
+        },
+        "mods": []
+    },
+    {
+        "name": "Game 04 - FC",
+        "download_links": {
+            "gofile": "https://gofile.io/d/PlfkpS"
+        },
+        "mods": [
+            {
+                "name": "Multi Mod",
+                "download_links": {
+                    "direct_link": "https://attachments.f95zone.to/2025/06/4986535_FamilyCrush_Lustifiedv1.0a.zip"
+                },
+                "steps_to_apply": [
+                    {
+                        "type": "extract",
+                        "target_folder": "%GAME_ROOT%"
+                    }
+                ]
             },
-            "steps_to_apply": [
-                {
-                    "type": "extract",
-                    "target_folder": "."
-                }, {
-                    "type": "move",
-                    "source_folder": "./DEAR-0.3-Joker WT Mod/Optional/game",
-                    "target_folder": "%GAME_ROOT%/DEAR-0.3-pc/game"
-                }
-            ]
-        }
-    ]
-},{
-    "name": "Game 02",
-    "thumbnail": "https://attachments.f95zone.to/2026/10/6660629_Header.jpg",
-    "download_links": {
-        "pixeldrain": "https://pixeldrain.com/api/file/iBsrkcMx?download"
-    },
-    "mods": [
-
-    ]
-}]
+            {
+                "name": "Gallery Unlocker",
+                "download_links": {
+                    "direct_link": "https://attachments.f95zone.to/2025/05/4910421_unlock_gallery.rpy"
+                },
+                "steps_to_apply": [
+                    {
+                        "type": "move",
+                        "target_folder": "%GAME_ROOT%/game"
+                    }
+                ]
+            }
+        ]
+    }
+]

@@ -15,13 +15,14 @@ Downloads are stored in a `YYYY-MM-DD_<game name>` folder. The game archive is
 extracted there, and selected mod archives are kept in its `game_mods`
 subfolder after their configured `steps_to_apply` have been run. The downloader
 accepts HTTPS URLs, normalizes Pixeldrain file links, and follows provider
-redirects. File-host pages that require a browser login, captcha, or other
-interactive access may need a direct download URL instead.
-
-Install the Python dependency with:
+redirects. For Workupload links, Library Box opens a visible Chromium browser;
+complete any verification and click the file's Download button there. The
+installer saves that browser-session download and then continues automatically.
+Install the Python dependencies and Playwright's Chromium browser once:
 
 ```powershell
 python -m pip install -r py_box\requirements.txt
+python -m playwright install chromium
 ```
 
 Run the CLI and archive tests with:

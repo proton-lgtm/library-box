@@ -48,6 +48,8 @@ class DownloaderEngine:
             return 'patreon'
         elif domain == 'patreonusercontent.com' or domain.endswith('.patreonusercontent.com'):
             return 'patreon'
+        elif domain == 'workupload.com' or domain.endswith('.workupload.com'):
+            return 'workupload'
         return 'direct'
 
     def _get_pixeldrain_direct_url(self, url: str) -> str:
@@ -73,6 +75,10 @@ class DownloaderEngine:
         # Patreon links need session cookies - return as-is
         return url
 
+    def _get_workupload_direct_url(self, url: str) -> str:
+        """Pass through Workupload links; redirects to file downloads are followed by requests."""
+        return url
+
     def _get_direct_download_url(self, url: str, source: str) -> str:
         """Get direct download URL based on source."""
         if source == 'pixeldrain':
@@ -81,6 +87,8 @@ class DownloaderEngine:
             return self._get_mixdrop_direct_url(url)
         elif source == 'patreon':
             return self._get_patreon_direct_url(url)
+        elif source == 'workupload':
+            return self._get_workupload_direct_url(url)
         return url
 
     @staticmethod
@@ -113,6 +121,60 @@ class DownloaderEngine:
                 flush=True,
             )
 
+    def _download_workupload(
+        self,
+        url: str,
+        destination: Path,
+        progress_callback: Optional[Callable[[int, int], None]],
+        item_name: Optional[str],
+    ) -> None:
+        """Wait for a user-initiated Workupload download in a visible browser."""
+        try:
+            from playwright.sync_api import (
+                Error as PlaywrightError,
+                TimeoutError as PlaywrightTimeoutError,
+                sync_playwright,
+            )
+        except ImportError as error:
+            raise ValueError(
+                "Workupload downloads require Playwright. Install dependencies with "
+                "'python -m pip install -r py_box\\requirements.txt', then run "
+                "'python -m playwright install chromium'."
+            ) from error
+
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=False)
+                try:
+                    page = browser.new_page(accept_downloads=True)
+                    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                    print(
+                        "Complete Workupload's verification in the browser, then "
+                        "click its Download button. The installer will continue "
+                        "when the download starts."
+                    )
+                    download = page.wait_for_event("download", timeout=600_000)
+                    download.save_as(str(destination))
+                finally:
+                    browser.close()
+        except PlaywrightTimeoutError as error:
+            raise ValueError(
+                "Timed out waiting for a Workupload download. Complete verification "
+                "and click the file's Download button in the opened browser."
+            ) from error
+        except PlaywrightError as error:
+            raise ValueError(
+                "Could not complete the Workupload browser download. Ensure "
+                "Playwright Chromium is installed with "
+                "'python -m playwright install chromium'. "
+                f"Details: {error}"
+            ) from error
+
+        size = destination.stat().st_size
+        print(f"Downloaded {item_name or destination.name} to {destination}.")
+        if progress_callback:
+            progress_callback(size, size)
+
     def download_file(
         self,
         url: str,
@@ -126,6 +188,12 @@ class DownloaderEngine:
             source = self._detect_source(url)
             direct_url = self._get_direct_download_url(url, source)
             print(f"Downloading {item_name or destination.name} from {source}...")
+
+            if source == "workupload":
+                self._download_workupload(
+                    direct_url, destination, progress_callback, item_name
+                )
+                return True
 
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'

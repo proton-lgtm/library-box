@@ -109,7 +109,7 @@ class GameDownloaderCLI:
 
     @staticmethod
     def _select_download_url(links: Dict[str, Any]) -> Optional[str]:
-        for source in ("pixeldrain", "patreon", "mixdrop", "direct"):
+        for source in ("pixeldrain", "workupload", "patreon", "mixdrop", "direct"):
             url = links.get(source)
             if isinstance(url, str) and url.strip():
                 return url.strip()
