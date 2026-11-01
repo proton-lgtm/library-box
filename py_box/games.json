@@ -1,4 +1,4 @@
-{
+[{
     "name": "Game 01",
     "thumbnail": "https://attachments.f95zone.to/2026/08/6367911_1786469712398.png",
     "download_links": {
@@ -18,9 +18,18 @@
                 }, {
                     "type": "move",
                     "source_folder": "./DEAR-0.3-Joker WT Mod/Optional/game",
-                    "target_folder": "%GAME_ROOT%/game"
+                    "target_folder": "%GAME_ROOT%/DEAR-0.3-pc/game"
                 }
             ]
         }
     ]
-}
+},{
+    "name": "Game 02",
+    "thumbnail": "https://attachments.f95zone.to/2026/10/6660629_Header.jpg",
+    "download_links": {
+        "pixeldrain": "https://pixeldrain.com/api/file/iBsrkcMx?download"
+    },
+    "mods": [
+
+    ]
+}]

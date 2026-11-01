@@ -5,7 +5,7 @@ import zipfile
 import requests
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlparse
 
 
@@ -83,12 +83,49 @@ class DownloaderEngine:
             return self._get_patreon_direct_url(url)
         return url
 
-    def download_file(self, url: str, destination: Path, progress_callback=None) -> bool:
+    @staticmethod
+    def _format_size(size: int) -> str:
+        """Format a byte count for download progress output."""
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if value < 1024 or unit == "TB":
+                return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+            value /= 1024
+        return f"{value:.1f} TB"
+
+    @classmethod
+    def _print_progress(cls, downloaded: int, total_size: int) -> None:
+        if total_size > 0:
+            percent = min(100, int(downloaded * 100 / total_size))
+            bar_width = 30
+            filled = int(bar_width * percent / 100)
+            bar = "#" * filled + "-" * (bar_width - filled)
+            print(
+                f"\r  [{bar}] {percent:3d}% "
+                f"({cls._format_size(downloaded)} / {cls._format_size(total_size)})",
+                end="",
+                flush=True,
+            )
+        else:
+            print(
+                f"\r  Downloaded {cls._format_size(downloaded)} (total size unknown)",
+                end="",
+                flush=True,
+            )
+
+    def download_file(
+        self,
+        url: str,
+        destination: Path,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        item_name: Optional[str] = None,
+    ) -> bool:
         """Download a file from URL to destination."""
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             source = self._detect_source(url)
             direct_url = self._get_direct_download_url(url, source)
+            print(f"Downloading {item_name or destination.name} from {source}...")
 
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -107,14 +144,20 @@ class DownloaderEngine:
 
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded = 0
+                progress_reported = False
                 with destination.open('wb') as file:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             file.write(chunk)
                             downloaded += len(chunk)
-                            if progress_callback and total_size > 0:
+                            self._print_progress(downloaded, total_size)
+                            progress_reported = True
+                            if progress_callback:
                                 progress_callback(downloaded, total_size)
 
+                if progress_reported:
+                    print()
+                print(f"Downloaded {item_name or destination.name} to {destination}.")
             return True
         except (requests.RequestException, OSError, ValueError) as e:
             print(f"Download failed: {e}")
@@ -145,16 +188,16 @@ class DownloaderEngine:
         self.game_folder = game_folder
         zip_path = game_folder / "game.zip"
 
-        print(f"Downloading {game_name}...")
-        if not self.download_file(download_url, zip_path):
+        if zip_path.exists():
+            print(f"Game archive already exists at {zip_path}; skipping download.")
+        elif not self.download_file(download_url, zip_path, item_name=game_name):
             return None
 
-        print(f"Extracting {game_name}...")
+        print(f"Extracting {game_name} from {zip_path}...")
         if not self.extract_zip(zip_path, game_folder):
             return None
 
-        # Remove zip after extraction
-        zip_path.unlink()
+        print(f"Keeping game archive at {zip_path}.")
 
         # Find the actual game folder (might be nested).
         extracted_items = [item for item in game_folder.iterdir() if item != zip_path]
@@ -171,8 +214,7 @@ class DownloaderEngine:
         ext = Path(parsed.path).suffix or '.zip'
         mod_path = game_mods_folder / f"{safe_name}{ext}"
 
-        print(f"Downloading mod: {mod_name}...")
-        if not self.download_file(download_url, mod_path):
+        if not self.download_file(download_url, mod_path, item_name=mod_name):
             return None
 
         return mod_path

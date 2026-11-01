@@ -44,7 +44,7 @@ class ModManager:
                 continue
 
             # Apply mod steps
-            print(f"Applying mod: {mod_name}...")
+            print(f"Applying mod: {mod_name} to {game_root}...")
             if not self._apply_mod_steps(mod_archive, game_root, steps, mod_name):
                 print(f"Failed to apply mod: {mod_name}")
                 all_succeeded = False
@@ -62,12 +62,14 @@ class ModManager:
 
         try:
             # First, extract the mod archive
+            print(f"  Extracting mod archive: {mod_archive.name}")
             if not self.downloader.extract_zip(mod_archive, temp_extract):
                 return False
 
             # Apply each step
-            for step in steps:
+            for index, step in enumerate(steps, start=1):
                 step_type = step.get('type')
+                print(f"  Applying step {index}/{len(steps)}: {step_type}")
                 if step_type == 'extract':
                     # Additional extraction if needed (e.g., nested archives)
                     target = step.get('target_folder', '.')
@@ -117,14 +119,24 @@ class ModManager:
         # Move all contents from source to target
         for item in source_path.iterdir():
             dest = target_path / item.name
-            if dest.exists():
-                if dest.is_dir():
-                    shutil.rmtree(dest)
-                else:
-                    dest.unlink()
-            shutil.move(str(item), str(dest))
+            self._move_item_merged(item, dest)
             print(f"  Moved: {item.name} -> {target_folder}")
         return True
+
+    def _move_item_merged(self, source: Path, destination: Path) -> None:
+        """Merge directories and replace conflicting files while moving mod content."""
+        if source.is_dir() and destination.is_dir():
+            for item in source.iterdir():
+                self._move_item_merged(item, destination / item.name)
+            source.rmdir()
+            return
+
+        if destination.exists():
+            if destination.is_dir():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink()
+        shutil.move(str(source), str(destination))
 
     def _resolve_path(self, base: Path, path_str: str, game_root: Optional[Path] = None) -> Path:
         """Resolve path with placeholders."""

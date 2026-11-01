@@ -6,7 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from downloader_engine import DownloaderEngine
 from main import GameDownloaderCLI
@@ -64,6 +64,69 @@ class ModPathTests(unittest.TestCase):
 
 
 class ArchiveExtractionTests(unittest.TestCase):
+    def test_download_file_logs_source_and_reports_progress(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            downloader = DownloaderEngine(str(root))
+            response = MagicMock()
+            response.headers = {"content-length": "4"}
+            response.iter_content.return_value = [b"data"]
+            get_response = MagicMock()
+            get_response.__enter__.return_value = response
+            progress = []
+            output = io.StringIO()
+
+            with patch("downloader_engine.requests.get", return_value=get_response):
+                with contextlib.redirect_stdout(output):
+                    downloaded = downloader.download_file(
+                        "https://example.com/game.zip",
+                        root / "game.zip",
+                        lambda current, total: progress.append((current, total)),
+                        item_name="Example Game",
+                    )
+
+            self.assertTrue(downloaded)
+            self.assertEqual(progress, [(4, 4)])
+            self.assertIn("Downloading Example Game from direct", output.getvalue())
+            self.assertIn("100%", output.getvalue())
+
+    def test_keeps_game_archive_after_extraction(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            downloader = DownloaderEngine(str(root))
+
+            def create_game_archive(_url, destination, **_kwargs):
+                with zipfile.ZipFile(destination, "w") as zip_file:
+                    zip_file.writestr("game/readme.txt", "installed")
+                return True
+
+            with patch.object(
+                downloader, "download_file", side_effect=create_game_archive
+            ):
+                game_root = downloader.download_and_extract_game(
+                    "Example", "https://example.com/game.zip"
+                )
+
+            self.assertIsNotNone(game_root)
+            self.assertTrue((downloader.game_folder / "game.zip").exists())
+            self.assertEqual((game_root / "readme.txt").read_text(), "installed")
+
+    def test_reuses_existing_game_archive_without_downloading(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            downloader = DownloaderEngine(temporary_directory)
+            game_folder = downloader._create_game_folder("Example")
+            with zipfile.ZipFile(game_folder / "game.zip", "w") as zip_file:
+                zip_file.writestr("game/readme.txt", "installed")
+
+            with patch.object(downloader, "download_file") as download_file:
+                game_root = downloader.download_and_extract_game(
+                    "Example", "https://example.com/game.zip"
+                )
+
+            download_file.assert_not_called()
+            self.assertEqual(game_root, game_folder / "game")
+            self.assertEqual((game_root / "readme.txt").read_text(), "installed")
+
     def test_rejects_zip_path_traversal(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -129,6 +192,35 @@ class ArchiveExtractionTests(unittest.TestCase):
                 (game_root / "game" / "walkthrough.rpy").read_text(),
                 "walkthrough",
             )
+
+    def test_move_step_merges_mod_directories_and_replaces_conflicting_files(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            game_root = root / "installed_game"
+            game_gui = game_root / "game" / "gui"
+            game_gui.mkdir(parents=True)
+            (game_gui / "main_menu.png").write_text("original menu")
+            (game_gui / "preferences.png").write_text("original preferences")
+
+            mod_gui = root / "mod" / "gui"
+            mod_gui.mkdir(parents=True)
+            (mod_gui / "main_menu.png").write_text("mod menu")
+            (mod_gui / "custom_button.png").write_text("mod button")
+            manager = ModManager(DownloaderEngine(str(root)))
+
+            applied = manager._handle_move_step(
+                root / "mod",
+                game_root,
+                ".",
+                "%GAME_ROOT%/game",
+            )
+
+            self.assertTrue(applied)
+            self.assertEqual((game_gui / "main_menu.png").read_text(), "mod menu")
+            self.assertEqual(
+                (game_gui / "preferences.png").read_text(), "original preferences"
+            )
+            self.assertEqual((game_gui / "custom_button.png").read_text(), "mod button")
 
 
 if __name__ == "__main__":
