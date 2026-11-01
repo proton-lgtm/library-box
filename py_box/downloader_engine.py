@@ -50,6 +50,8 @@ class DownloaderEngine:
             return 'patreon'
         elif domain == 'workupload.com' or domain.endswith('.workupload.com'):
             return 'workupload'
+        elif domain == 'gofile.io' or domain.endswith('.gofile.io'):
+            return 'gofile'
         return 'direct'
 
     def _get_pixeldrain_direct_url(self, url: str) -> str:
@@ -121,14 +123,14 @@ class DownloaderEngine:
                 flush=True,
             )
 
-    def _download_workupload(
+    def _download_browser_host(
         self,
         url: str,
         destination: Path,
         progress_callback: Optional[Callable[[int, int], None]],
         item_name: Optional[str],
     ) -> None:
-        """Wait for a user-initiated Workupload download in a visible browser."""
+        """Use a browser for manual verification, then stream its file URL in Python."""
         try:
             from playwright.sync_api import (
                 Error as PlaywrightError,
@@ -137,7 +139,7 @@ class DownloaderEngine:
             )
         except ImportError as error:
             raise ValueError(
-                "Workupload downloads require Playwright. Install dependencies with "
+                "Browser-assisted downloads require Playwright. Install dependencies with "
                 "'python -m pip install -r py_box\\requirements.txt', then run "
                 "'python -m playwright install chromium'."
             ) from error
@@ -149,31 +151,75 @@ class DownloaderEngine:
                     page = browser.new_page(accept_downloads=True)
                     page.goto(url, wait_until="domcontentloaded", timeout=60_000)
                     print(
-                        "Complete Workupload's verification in the browser, then "
+                        "Complete the file host's verification in the browser, then "
                         "click its Download button. The installer will continue "
-                        "when the download starts."
+                        "the transfer in the terminal."
                     )
                     download = page.wait_for_event("download", timeout=600_000)
-                    download.save_as(str(destination))
+                    download_url = download.url
+                    if urlparse(download_url).scheme.lower() not in {"http", "https"}:
+                        raise ValueError(
+                            "The browser started a download that does not have an "
+                            "HTTP(S) URL, so it cannot be streamed by the installer."
+                        )
+                    cookies = page.context.cookies([download_url])
+                    user_agent = page.evaluate("navigator.userAgent")
+                    referer = page.url
+                    download.cancel()
                 finally:
                     browser.close()
         except PlaywrightTimeoutError as error:
             raise ValueError(
-                "Timed out waiting for a Workupload download. Complete verification "
+                "Timed out waiting for a browser download. Complete verification "
                 "and click the file's Download button in the opened browser."
             ) from error
         except PlaywrightError as error:
             raise ValueError(
-                "Could not complete the Workupload browser download. Ensure "
+                "Could not capture the browser download. Ensure "
                 "Playwright Chromium is installed with "
                 "'python -m playwright install chromium'. "
                 f"Details: {error}"
             ) from error
 
-        size = destination.stat().st_size
+        with requests.Session() as session:
+            for cookie in cookies:
+                session.cookies.set(
+                    cookie["name"],
+                    cookie["value"],
+                    domain=cookie.get("domain"),
+                    path=cookie.get("path", "/"),
+                    secure=cookie.get("secure", False),
+                )
+
+            headers = {
+                "User-Agent": user_agent,
+                "Referer": referer,
+            }
+            with session.get(
+                download_url, headers=headers, stream=True, timeout=30
+            ) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").lower()
+                if "text/html" in content_type or "application/json" in content_type:
+                    raise ValueError(
+                        "The verified browser download URL returned a web page "
+                        "instead of a file. Try the Download button again."
+                    )
+
+                total_size = int(response.headers.get("content-length", 0))
+                downloaded = 0
+                with destination.open("wb") as file:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            file.write(chunk)
+                            downloaded += len(chunk)
+                            self._print_progress(downloaded, total_size)
+                            if progress_callback:
+                                progress_callback(downloaded, total_size)
+
+        if downloaded:
+            print()
         print(f"Downloaded {item_name or destination.name} to {destination}.")
-        if progress_callback:
-            progress_callback(size, size)
 
     def download_file(
         self,
@@ -189,8 +235,8 @@ class DownloaderEngine:
             direct_url = self._get_direct_download_url(url, source)
             print(f"Downloading {item_name or destination.name} from {source}...")
 
-            if source == "workupload":
-                self._download_workupload(
+            if source in {"workupload", "gofile"}:
+                self._download_browser_host(
                     direct_url, destination, progress_callback, item_name
                 )
                 return True

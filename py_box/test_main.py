@@ -49,6 +49,23 @@ class GameDownloaderCliTests(unittest.TestCase):
             "https://workupload.com/file/example",
         )
 
+    def test_prefers_direct_link_and_selects_gofile(self):
+        self.assertEqual(
+            GameDownloaderCLI._select_download_url(
+                {
+                    "gofile": "https://gofile.io/d/example",
+                    "direct_link": "https://example.com/archive.zip",
+                }
+            ),
+            "https://example.com/archive.zip",
+        )
+        self.assertEqual(
+            GameDownloaderCLI._select_download_url(
+                {"gofile": "https://gofile.io/d/example"}
+            ),
+            "https://gofile.io/d/example",
+        )
+
 
 class ModPathTests(unittest.TestCase):
     def test_resolves_game_root_placeholder(self):
@@ -91,31 +108,39 @@ class ArchiveExtractionTests(unittest.TestCase):
             "https://workupload.com/file/example",
         )
 
-    def test_workupload_download_uses_browser_session(self):
+    def test_detects_gofile_share_link(self):
+        downloader = DownloaderEngine(".")
+
+        self.assertEqual(
+            downloader._detect_source("https://gofile.io/d/example"),
+            "gofile",
+        )
+
+    def test_browser_host_download_uses_python_streaming(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             downloader = DownloaderEngine(temporary_directory)
             output = io.StringIO()
             progress = []
 
-            with patch.object(downloader, "_download_workupload") as browser_download:
+            with patch.object(downloader, "_download_browser_host") as browser_download:
                 with patch("downloader_engine.requests.get") as request_get:
                     with contextlib.redirect_stdout(output):
                         downloaded = downloader.download_file(
-                            "https://workupload.com/file/example",
+                            "https://gofile.io/d/example",
                             root / "game.zip",
                             lambda current, total: progress.append((current, total)),
                         )
 
             self.assertTrue(downloaded)
-            self.assertEqual(browser_download.call_args.args[0], "https://workupload.com/file/example")
+            self.assertEqual(browser_download.call_args.args[0], "https://gofile.io/d/example")
             self.assertEqual(browser_download.call_args.args[1], root / "game.zip")
             self.assertTrue(callable(browser_download.call_args.args[2]))
             self.assertIsNone(browser_download.call_args.args[3])
             request_get.assert_not_called()
-            self.assertIn("from workupload", output.getvalue())
+            self.assertIn("from gofile", output.getvalue())
 
-    def test_download_workupload_saves_browser_download_and_reports_progress(self):
+    def test_browser_host_download_streams_with_browser_cookies_and_progress(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             destination = root / "game.zip"
@@ -124,11 +149,28 @@ class ArchiveExtractionTests(unittest.TestCase):
             download = MagicMock()
 
             class FakePage:
+                context = MagicMock()
+                url = "https://workupload.com/file/example"
+
+                def __init__(self):
+                    self.context.cookies.return_value = [
+                        {
+                            "name": "session",
+                            "value": "verified",
+                            "domain": ".workupload.com",
+                            "path": "/",
+                            "secure": True,
+                        }
+                    ]
+
                 def goto(self, *_args, **_kwargs):
                     return None
 
                 def wait_for_event(self, *_args, **_kwargs):
                     return download
+
+                def evaluate(self, _script):
+                    return "test-agent"
 
             class FakeBrowser:
                 def new_page(self, **_kwargs):
@@ -150,10 +192,8 @@ class ArchiveExtractionTests(unittest.TestCase):
                 def __exit__(self, *_args):
                     return None
 
-            def save_download(path):
-                Path(path).write_bytes(b"archive")
-
-            download.save_as.side_effect = save_download
+            download.url = "https://download.workupload.com/file/archive"
+            download.cancel = MagicMock()
             fake_sync_playwright = MagicMock(return_value=FakePlaywright())
             error_type = type("PlaywrightError", (Exception,), {})
             timeout_type = type("PlaywrightTimeoutError", (error_type,), {})
@@ -161,11 +201,19 @@ class ArchiveExtractionTests(unittest.TestCase):
             playwright_module.Error = error_type
             playwright_module.TimeoutError = timeout_type
             playwright_module.sync_playwright = fake_sync_playwright
+            response = MagicMock()
+            response.headers = {"content-length": "7"}
+            response.iter_content.return_value = [b"archive"]
+            response.__enter__.return_value = response
+            response.__exit__.return_value = None
+            session = MagicMock()
+            session.__enter__.return_value = session
+            session.__exit__.return_value = None
+            session.get.return_value = response
 
-            with patch.dict(
-                "sys.modules", {"playwright.sync_api": playwright_module}
-            ):
-                downloader._download_workupload(
+            with patch.dict("sys.modules", {"playwright.sync_api": playwright_module}), \
+                    patch("downloader_engine.requests.Session", return_value=session):
+                downloader._download_browser_host(
                     "https://workupload.com/file/example",
                     destination,
                     lambda current, total: progress.append((current, total)),
@@ -174,7 +222,46 @@ class ArchiveExtractionTests(unittest.TestCase):
 
             self.assertEqual(destination.read_bytes(), b"archive")
             self.assertEqual(progress, [(7, 7)])
-            download.save_as.assert_called_once_with(str(destination))
+            download.cancel.assert_called_once()
+            session.cookies.set.assert_called_once_with(
+                "session",
+                "verified",
+                domain=".workupload.com",
+                path="/",
+                secure=True,
+            )
+            session.get.assert_called_once_with(
+                "https://download.workupload.com/file/archive",
+                headers={
+                    "User-Agent": "test-agent",
+                    "Referer": "https://workupload.com/file/example",
+                },
+                stream=True,
+                timeout=30,
+            )
+
+    def test_applies_direct_file_mod_to_target_folder(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            mod_file = root / "unlock_gallery.rpy"
+            mod_file.write_text("gallery unlocked")
+            game_root = root / "installed_game"
+            game_root.mkdir()
+            manager = ModManager(DownloaderEngine(temporary_directory))
+
+            applied = manager._apply_mod_steps(
+                mod_file,
+                game_root,
+                [{"type": "move", "target_folder": "%GAME_ROOT%/game"}],
+                "Gallery Unlocker",
+            )
+
+            self.assertTrue(applied)
+            self.assertEqual(
+                (game_root / "game" / "unlock_gallery.rpy").read_text(),
+                "gallery unlocked",
+            )
+            self.assertEqual(mod_file.read_text(), "gallery unlocked")
 
     def test_download_file_logs_source_and_reports_progress(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

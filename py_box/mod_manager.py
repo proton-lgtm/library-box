@@ -1,6 +1,7 @@
 """Mod manager for applying game mods."""
 
 import shutil
+import zipfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -26,7 +27,15 @@ class ModManager:
 
             # Prefer direct file links over file-host share pages.
             download_url = None
-            for source in ['pixeldrain', 'workupload', 'patreon', 'mixdrop', 'direct']:
+            for source in [
+                'direct_link',
+                'pixeldrain',
+                'gofile',
+                'workupload',
+                'patreon',
+                'mixdrop',
+                'direct',
+            ]:
                 if source in download_links:
                     download_url = download_links[source]
                     break
@@ -63,8 +72,16 @@ class ModManager:
         try:
             # First, extract the mod archive
             print(f"  Extracting mod archive: {mod_archive.name}")
-            if not self.downloader.extract_zip(mod_archive, temp_extract):
+            if zipfile.is_zipfile(mod_archive):
+                if not self.downloader.extract_zip(mod_archive, temp_extract):
+                    return False
+            elif mod_archive.suffix.lower() == ".zip":
+                print(f"  Mod archive is not a valid ZIP file: {mod_archive.name}")
                 return False
+            else:
+                return self._apply_single_file_mod(
+                    mod_archive, game_root, steps
+                )
 
             # Apply each step
             for index, step in enumerate(steps, start=1):
@@ -89,6 +106,33 @@ class ModManager:
             # Clean up temp folder
             if temp_extract.exists():
                 shutil.rmtree(temp_extract)
+
+    def _apply_single_file_mod(
+        self, mod_file: Path, game_root: Path, steps: List[Dict[str, Any]]
+    ) -> bool:
+        """Copy a directly linked file mod into its configured game folder."""
+        if len(steps) != 1 or steps[0].get("type") != "move":
+            print(
+                f"Direct file mod {mod_file.name} requires one move step "
+                "with a target_folder."
+            )
+            return False
+        step = steps[0]
+        if step.get("source_folder"):
+            print("A direct file mod cannot use source_folder.")
+            return False
+
+        target_folder = step.get("target_folder")
+        if not isinstance(target_folder, str) or not target_folder:
+            print(f"No valid target_folder configured for {mod_file.name}.")
+            return False
+
+        target_path = self._resolve_path(game_root, target_folder, game_root)
+        target_path.mkdir(parents=True, exist_ok=True)
+        destination = target_path / mod_file.name
+        shutil.copy2(mod_file, destination)
+        print(f"  Copied: {mod_file.name} -> {target_folder}")
+        return True
 
     def _handle_extract_step(self, mod_root: Path, game_root: Path, target_folder: str) -> bool:
         """Handle extract step - extract nested archives."""
