@@ -116,10 +116,56 @@ struct CatalogSeed {
     description: String,
     cover_url: String,
     game_url: String,
-    download_url: Option<String>,
+    download_url: Option<serde_json::Value>,
     genre: String,
     published: String,
     browser_only: bool,
+}
+
+#[cfg(target_os = "windows")]
+const CURRENT_PLATFORM_DOWNLOAD_KEYS: &[&str] = &["pc", "windows", "win", "universal", "all"];
+#[cfg(target_os = "macos")]
+const CURRENT_PLATFORM_DOWNLOAD_KEYS: &[&str] =
+    &["mac", "macos", "osx", "darwin", "universal", "all"];
+#[cfg(target_os = "linux")]
+const CURRENT_PLATFORM_DOWNLOAD_KEYS: &[&str] = &["linux", "universal", "all"];
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+const CURRENT_PLATFORM_DOWNLOAD_KEYS: &[&str] = &[];
+
+fn platform_download_url(value: &serde_json::Value, platform_keys: &[&str]) -> Option<String> {
+    match value {
+        serde_json::Value::String(url) => Some(url.clone()),
+        serde_json::Value::Object(platforms) => platform_keys.iter().find_map(|key| {
+            let target = platforms
+                .iter()
+                .find(|(platform, _)| platform.eq_ignore_ascii_case(key))
+                .map(|(_, target)| target)?;
+            target
+                .as_str()
+                .or_else(|| target.get("url").and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+        }),
+        _ => None,
+    }
+}
+
+fn resolve_catalog_download_url(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        return platform_download_url(&value, CURRENT_PLATFORM_DOWNLOAD_KEYS);
+    }
+    Some(raw.to_string())
+}
+
+fn validate_download_availability(
+    browser_only: bool,
+    has_itch_file: bool,
+    has_direct_download: bool,
+) -> Result<(), String> {
+    if browser_only && !has_itch_file && !has_direct_download {
+        return Err("This title is browser-only and cannot be installed as a desktop game.".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -268,6 +314,10 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
     let seeds: Vec<CatalogSeed> = serde_json::from_str(include_str!("catalog.json"))
         .map_err(|error| format!("Bundled game catalog is invalid: {error}"))?;
     for seed in seeds {
+        let download_url = seed.download_url.as_ref().map(|value| match value {
+            serde_json::Value::String(url) => url.clone(),
+            value => value.to_string(),
+        });
         connection
             .execute(
                 "INSERT INTO games (slug,title,creator,description,cover_url,game_url,download_url,genre,published,browser_only)
@@ -290,7 +340,7 @@ fn initialize_db(connection: &Connection) -> Result<(), String> {
                     seed.description,
                     seed.cover_url,
                     seed.game_url,
-                    seed.download_url,
+                    download_url,
                     seed.genre,
                     seed.published,
                     if seed.browser_only { 1_i64 } else { 0_i64 }
@@ -360,7 +410,7 @@ fn query_games(connection: &Connection) -> Result<Vec<Game>, String> {
                     description,
                     cover_url,
                     game_url,
-                    download_url,
+                    download_url: resolve_catalog_download_url(download_url.as_deref()),
                     genre,
                     published,
                     download_status,
@@ -888,15 +938,82 @@ fn make_control() -> Arc<TransferControl> {
 fn validate_download_url(raw: &str) -> Result<(), String> {
     let url = url::Url::parse(raw).map_err(|error| format!("Invalid download URL: {error}"))?;
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let itch_host = host == "itch.io"
+        || host.ends_with(".itch.io")
+        || host == "itch.zone"
+        || host.ends_with(".itch.zone");
+    let file_host = [
+        "pixeldrain.com",
+        "gofile.io",
+        "datanodes.to",
+        "datanodes.com",
+        "uploadhaven.com",
+        "vikingfile.com",
+        "mixdrop.ag",
+        "mixdrop.fileo.me",
+    ]
+    .iter()
+    .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
     if url.scheme() != "https"
-        || !(host == "itch.io"
-            || host.ends_with(".itch.io")
-            || host == "itch.zone"
-            || host.ends_with(".itch.zone"))
+        || url.port().is_some_and(|port| port != 443)
+        || url.host_str().is_none()
+        || !(itch_host || file_host)
     {
-        return Err("Downloads are only allowed from HTTPS itch.io and itch.zone URLs.".into());
+        return Err("Use an HTTPS itch.io URL or a direct link from a supported file host.".into());
     }
     Ok(())
+}
+
+fn resolve_public_download_url(raw: &str) -> Result<String, String> {
+    validate_download_url(raw)?;
+    let mut url = url::Url::parse(raw).map_err(|error| format!("Invalid download URL: {error}"))?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host == "pixeldrain.com" || host == "www.pixeldrain.com" {
+        let segments: Vec<String> = url
+            .path_segments()
+            .map(|segments| segments.map(str::to_string).collect())
+            .unwrap_or_default();
+        if segments.len() == 2 && matches!(segments[0].as_str(), "u" | "d") {
+            let id = segments[1].clone();
+            if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+                return Err("The Pixeldrain share URL has an invalid file ID.".into());
+            }
+            url.set_host(Some("pixeldrain.com"))
+                .map_err(|_| "Cannot normalize the Pixeldrain host.".to_string())?;
+            url.set_path(&format!("/api/file/{id}"));
+            url.set_query(Some("download=1"));
+            url.set_fragment(None);
+            return Ok(url.into());
+        }
+    }
+    Ok(raw.to_string())
+}
+
+fn validate_direct_download_content_type(
+    download_url: &str,
+    content_type: Option<&str>,
+) -> Result<(), String> {
+    let content_type = content_type.unwrap_or_default().to_ascii_lowercase();
+    if content_type.starts_with("text/html") || content_type.starts_with("application/json") {
+        let host = url::Url::parse(download_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+            .unwrap_or_default();
+        let message = if host.contains("mixdrop") {
+            "MixDrop share pages are not direct file links. Use a direct HTTPS file URL; Redline does not automate MixDrop's download page."
+        } else if host == "gofile.io" || host.ends_with(".gofile.io") {
+            "GoFile share pages are not direct file links. Use a direct HTTPS file URL; Redline does not automate GoFile's download page."
+        } else {
+            "The URL returned a web page instead of a file. Use the host's direct download URL; Redline does not bypass countdowns, captchas, or sign-in gates."
+        };
+        return Err(message.into());
+    }
+    Ok(())
+}
+
+fn validate_download_redirect_url(raw: &str, selected_file_name: Option<&str>) -> bool {
+    validate_download_url(raw).is_ok()
+        || (selected_file_name.is_some() && validate_itch_signed_download_url(raw).is_ok())
 }
 
 fn validate_download_response_url(
@@ -961,12 +1078,11 @@ async fn start_download(
             .ok_or_else(|| "That game is no longer in the catalog.".to_string())?;
         (url, slug, game_url, browser_only, files_json)
     };
-    if browser_only {
-        return Err("This title is browser-only and cannot be installed as a desktop game.".into());
-    }
     let file_name = file_name
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty());
+    let direct_url = resolve_catalog_download_url(url.as_deref());
+    validate_download_availability(browser_only, file_name.is_some(), direct_url.is_some())?;
     if upload_id.is_some() || file_name.is_some() {
         validate_itch_page_url(
             &url::Url::parse(&game_url)
@@ -987,7 +1103,7 @@ async fn start_download(
             return Err("Choose an installable file from this game's itch.io page.".into());
         }
     } else {
-        let direct_url = url.as_deref().ok_or_else(|| {
+        let direct_url = direct_url.as_deref().ok_or_else(|| {
             "No verified public download is available for this game yet.".to_string()
         })?;
         validate_download_url(direct_url)?;
@@ -1040,7 +1156,7 @@ async fn start_download(
                  archive_path=excluded.archive_path,install_dir=excluded.install_dir,launch_path=NULL,run_after=excluded.run_after,error=NULL,updated_at=CURRENT_TIMESTAMP",
             params![
                 game_id,
-                url.unwrap_or_default(),
+                direct_url.unwrap_or_default(),
                 upload_id,
                 file_name,
                 cached_archive_size.unwrap_or(0) as i64,
@@ -1219,20 +1335,39 @@ async fn download_and_install(
             Some(downloaded),
             None,
         );
-        return install_archive(state, app, record, control, record.archive_path.clone(), downloaded)
-            .await;
+        return install_archive(
+            state,
+            app,
+            record,
+            control,
+            record.archive_path.clone(),
+            downloaded,
+        )
+        .await;
     }
 
     let download_url = if let Some(file_name) = record.file_name.as_deref() {
         resolve_itch_download(&record.game_url, file_name).await?
     } else {
-        validate_download_url(&record.url)?;
-        record.url.clone()
+        resolve_public_download_url(&record.url)?
     };
     let client = Client::builder()
         .user_agent(concat!("RedlineLibrary/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
         .read_timeout(Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::custom({
+            let is_itch_file = record.file_name.is_some();
+            move |attempt| {
+                if validate_download_redirect_url(
+                    attempt.url().as_str(),
+                    is_itch_file.then_some("selected itch.io file"),
+                ) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }
+        }))
         .build()
         .map_err(|error| format!("Cannot initialize secure download client: {error}"))?;
     let mut existing = tokio::fs::metadata(&record.archive_path)
@@ -1251,6 +1386,13 @@ async fn download_and_install(
     let status = response.status();
     if !status.is_success() {
         return Err(format!("Download server returned HTTP {status}."));
+    }
+    if record.file_name.is_none() {
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        validate_direct_download_content_type(&download_url, content_type)?;
     }
     if existing > 0 && status != reqwest::StatusCode::PARTIAL_CONTENT {
         existing = 0;
@@ -1723,6 +1865,56 @@ mod tests {
     }
 
     #[test]
+    fn selects_download_urls_for_each_platform_and_keeps_legacy_strings() {
+        let download = serde_json::json!({
+            "pc": {"url": "https://gofile.io/d/pc", "name": "pc.zip"},
+            "mac": {"url": "https://gofile.io/d/mac", "name": "mac.zip"},
+            "linux": {"url": "https://gofile.io/d/linux", "name": "linux.zip"}
+        });
+        assert_eq!(
+            platform_download_url(&download, &["pc", "windows"]),
+            Some("https://gofile.io/d/pc".into())
+        );
+        assert_eq!(
+            platform_download_url(&download, &["mac", "macos"]),
+            Some("https://gofile.io/d/mac".into())
+        );
+        assert_eq!(
+            platform_download_url(&download, &["linux"]),
+            Some("https://gofile.io/d/linux".into())
+        );
+        assert_eq!(
+            platform_download_url(
+                &serde_json::json!("https://pixeldrain.com/u/BxuLDvJG"),
+                &["pc"]
+            ),
+            Some("https://pixeldrain.com/u/BxuLDvJG".into())
+        );
+        assert!(platform_download_url(&download, &["android"]).is_none());
+
+        let seeds = serde_json::from_str::<Vec<CatalogSeed>>(include_str!("catalog.json")).unwrap();
+        let test_game = seeds
+            .iter()
+            .find(|seed| seed.slug == "test-2")
+            .expect("platform-specific catalog entry");
+        assert_eq!(
+            test_game
+                .download_url
+                .as_ref()
+                .and_then(|value| platform_download_url(value, CURRENT_PLATFORM_DOWNLOAD_KEYS)),
+            Some("https://gofile.io/d/bZPEjqpB".into())
+        );
+    }
+
+    #[test]
+    fn platform_download_url_allows_desktop_download_for_browser_only_entries() {
+        assert!(validate_download_availability(true, false, true).is_ok());
+        assert!(validate_download_availability(true, true, false).is_ok());
+        assert!(validate_download_availability(true, false, false).is_err());
+        assert!(validate_download_availability(false, false, false).is_ok());
+    }
+
+    #[test]
     fn adds_new_catalog_entries_to_an_existing_database() {
         let connection = Connection::open_in_memory().expect("in-memory database");
         initialize_db(&connection).expect("initial catalog");
@@ -1759,7 +1951,10 @@ mod tests {
         let connection = Connection::open_in_memory().expect("in-memory database");
         initialize_db(&connection).expect("initial catalog");
         connection
-            .execute("UPDATE games SET title='Old title' WHERE slug='stillwater'", [])
+            .execute(
+                "UPDATE games SET title='Old title' WHERE slug='stillwater'",
+                [],
+            )
             .expect("make seed data stale");
 
         initialize_db(&connection).expect("catalog update");
@@ -1777,8 +1972,8 @@ mod tests {
     fn marks_missing_installs_as_reinstallable() {
         let connection = Connection::open_in_memory().expect("in-memory database");
         initialize_db(&connection).expect("schema and catalog");
-        let missing_dir = std::env::temp_dir()
-            .join(format!("redline-missing-install-{}", std::process::id()));
+        let missing_dir =
+            std::env::temp_dir().join(format!("redline-missing-install-{}", std::process::id()));
         let _ = fs::remove_dir_all(&missing_dir);
         connection
             .execute(
@@ -1841,8 +2036,11 @@ mod tests {
             .expect("previous schema");
         initialize_db(&connection).expect("database upgrades");
         let games = query_games(&connection).expect("upgraded game list");
-        assert_eq!(games.len(), 1);
-        assert_eq!(games[0].slug, "stillwater");
+        let seeds = serde_json::from_str::<Vec<CatalogSeed>>(include_str!("catalog.json"))
+            .expect("current catalog");
+        assert_eq!(games.len(), seeds.len());
+        assert!(games.iter().any(|game| game.slug == "stillwater"));
+        assert!(games.iter().any(|game| game.slug == "test-0"));
         let remember_browser_only: i64 = connection
             .query_row(
                 "SELECT browser_only FROM games WHERE slug='remember'",
@@ -1851,6 +2049,14 @@ mod tests {
             )
             .expect("preserved installed game record");
         assert_eq!(remember_browser_only, 0);
+        let remember_visible: i64 = connection
+            .query_row(
+                "SELECT catalog_visible FROM games WHERE slug='remember'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved historical game row");
+        assert_eq!(remember_visible, 0);
         let download_columns: Vec<String> = connection
             .prepare("PRAGMA table_info(downloads)")
             .unwrap()
@@ -1870,6 +2076,92 @@ mod tests {
         assert!(validate_download_url("https://itch.io/download").is_ok());
         assert!(validate_download_url("http://foo.itch.zone/download").is_err());
         assert!(validate_download_url("https://itch.io.attacker.example/download").is_err());
+    }
+
+    #[test]
+    fn downloader_accepts_direct_links_from_supported_hosters() {
+        for url in [
+            "https://pixeldrain.com/api/file/BxuLDvJG?download=1",
+            "https://gofile.io/download/abc123",
+            "https://store-1.gofile.io/download/abc123",
+            "https://datanodes.to/files/game.zip",
+            "https://datanodes.com/files/game.zip",
+            "https://uploadhaven.com/download/game.zip",
+            "https://vikingfile.com/download/game.zip",
+            "https://mixdrop.ag/f/xw03owmruomvn3",
+            "https://mixdrop.fileo.me/download/game.zip",
+        ] {
+            assert!(validate_download_url(url).is_ok(), "{url}");
+        }
+        assert!(validate_download_url("https://pixeldrain.com.attacker.test/file").is_err());
+        assert!(validate_download_url("http://gofile.io/download/abc123").is_err());
+    }
+
+    #[test]
+    fn resolves_pixeldrain_share_pages_to_public_file_api() {
+        assert_eq!(
+            resolve_public_download_url("https://pixeldrain.com/u/BxuLDvJG").unwrap(),
+            "https://pixeldrain.com/api/file/BxuLDvJG?download=1"
+        );
+        assert_eq!(
+            resolve_public_download_url("https://www.pixeldrain.com/d/BxuLDvJG?ref=share").unwrap(),
+            "https://pixeldrain.com/api/file/BxuLDvJG?download=1"
+        );
+        assert_eq!(
+            resolve_public_download_url("https://pixeldrain.com/api/file/BxuLDvJG?download=1")
+                .unwrap(),
+            "https://pixeldrain.com/api/file/BxuLDvJG?download=1"
+        );
+        assert!(resolve_public_download_url("https://pixeldrain.com/u/not-valid!").is_err());
+    }
+
+    #[test]
+    fn rejects_hoster_landing_pages_instead_of_saving_html_as_archives() {
+        let direct_url = "https://pixeldrain.com/api/file/BxuLDvJG?download=1";
+        assert!(validate_direct_download_content_type(direct_url, Some("application/zip")).is_ok());
+        assert!(validate_direct_download_content_type(
+            direct_url,
+            Some("application/octet-stream")
+        )
+        .is_ok());
+        assert!(validate_direct_download_content_type(direct_url, None).is_ok());
+        let error = validate_direct_download_content_type(
+            "https://mixdrop.fileo.me/f/xw03owmruomvn3",
+            Some("text/html; charset=utf-8"),
+        )
+        .unwrap_err();
+        assert!(error.contains("MixDrop share pages are not direct file links"));
+        let error = validate_direct_download_content_type(
+            "https://example.test/share/123",
+            Some("text/html; charset=utf-8"),
+        )
+        .unwrap_err();
+        assert!(error.contains("direct download URL"));
+        assert!(validate_direct_download_content_type(
+            "https://example.test/share/123",
+            Some("application/json")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn download_redirects_stay_on_supported_hosts_or_itch_signed_storage() {
+        assert!(validate_download_redirect_url(
+            "https://cdn.pixeldrain.com/file.zip",
+            None
+        ));
+        assert!(!validate_download_redirect_url(
+            "https://attacker.example/file.zip",
+            None
+        ));
+        assert!(validate_download_redirect_url(
+            "https://itchio-mirror.abc123.r2.cloudflarestorage.com/upload2/game/1/2?sig=ok",
+            Some("game.zip")
+        ));
+        assert!(!validate_download_redirect_url(
+            "https://attacker.example/upload2/game/1/2",
+            Some("game.zip")
+        ));
     }
 
     #[test]

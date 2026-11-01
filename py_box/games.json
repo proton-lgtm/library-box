@@ -1,0 +1,25 @@
+{
+    "name": "Game 01",
+    "thumbnail": "https://attachments.f95zone.to/2026/08/6367911_1786469712398.png",
+    "download_links": {
+        "pixeldrain": "https://pixeldrain.com/u/rNN48Qfi"
+    },
+    "mods": [
+        {
+            "name": "Walkthrough Mod",
+            "download_links": {
+                "mixdrop": "https://592lvpizh.mxcontent.net/d/677dldnof6zzk3/qdcaoh4pq6rf8a2fi72jei2kdumh"
+            },
+            "steps_to_apply": [
+                {
+                    "type": "extract",
+                    "target_folder": "."
+                }, {
+                    "type": "move",
+                    "source_folder": "./DEAR-0.3-Joker WT Mod/Optional/game",
+                    "target_folder": "%GAME_ROOT%/game"
+                }
+            ]
+        }
+    ]
+}

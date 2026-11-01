@@ -106,12 +106,12 @@ function App() {
         items.map((item) =>
           item.gameId === update.gameId
             ? {
-                ...item,
-                status: update.status,
-                bytesDownloaded: update.bytesDownloaded,
-                totalBytes: update.totalBytes,
-                error: update.error,
-              }
+              ...item,
+              status: update.status,
+              bytesDownloaded: update.bytesDownloaded,
+              totalBytes: update.totalBytes,
+              error: update.error,
+            }
             : item,
         ),
       );
@@ -284,13 +284,13 @@ function App() {
                     setActionError("");
                     if (selectedInstalled) {
                       void report(invoke("launch_game", { gameId: selected.id }));
-                    } else if ((installableFiles.length > 0 || selected.downloadUrl) && !selected.browserOnly) {
+                    } else if (installableFiles.length > 0 || selected.downloadUrl) {
                       setModalGame(selected);
                     } else {
                       void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)));
                     }
                   }}>
-                    {selectedInstalled ? <Play size={18} fill="currentColor" /> : <Download size={18} />} {filesLoading && !selectedInstalled ? "CHECKING DOWNLOADS..." : selectedInstalled ? "PLAY" : (installableFiles.length > 0 || selected.downloadUrl) && !selected.browserOnly ? "DOWNLOAD GAME" : selected.browserOnly ? "PLAY IN BROWSER" : "OPEN ON ITCH.IO"}
+                    {selectedInstalled ? <Play size={18} fill="currentColor" /> : <Download size={18} />} {filesLoading && !selectedInstalled ? "CHECKING DOWNLOADS..." : selectedInstalled ? "PLAY" : (installableFiles.length > 0 || selected.downloadUrl) ? "DOWNLOAD GAME" : selected.browserOnly ? "PLAY IN BROWSER" : "OPEN ON ITCH.IO"}
                   </button>
                   <button className="button-secondary" onClick={() => void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)))}>{selected.browserPlayable ? "PLAY IN BROWSER" : "VIEW ON ITCH.IO"} <ArrowUpRight size={16} /></button>
                 </div>
@@ -378,7 +378,8 @@ function App() {
                     <div className="download-foot"><span>{item.error || (pct !== null ? `${pct}% complete` : item.status === "downloading" ? "Receiving data…" : item.status === "installed" ? "Installed successfully" : item.installDir)}</span><div className="download-controls">
                       {item.status === "downloading" && <button title="Pause download" onClick={() => void report(invoke("pause_download", { gameId: item.gameId }))}><Pause size={16} /></button>}
                       {item.status === "paused" && <button title="Resume download" onClick={() => void report(invoke("resume_download", { gameId: item.gameId }))}><CirclePlay size={17} /></button>}
-                      {item.status === "failed" && <button title="Retry download" onClick={() => {if(game){setFolder(item.installDir.replace(/[\\/][^\\/]+$/, ""));setSelectedFileName(game.files.find((file) => file.installable)?.fileName ?? null);setModalGame(game);}}}><CirclePlay size={17} /></button>}
+                      {item.status === "failed" && <button title="Retry download" onClick={() => { if (game) { setFolder(item.installDir.replace(/[\\/][^\\/]+$/, "")); setSelectedFileName(game.files.find((file) => file.installable)?.fileName ?? null); setModalGame(game); } }}><CirclePlay size={17} /></button>}
+                      {item.status === "failed" && game?.downloadUrl && <button title="Open host download page" aria-label="Open host download page" onClick={() => void openUrl(game.downloadUrl!).catch((e: unknown) => setActionError(String(e)))}><ArrowUpRight size={16} /></button>}
                       {item.status !== "installed" && <button title="Cancel download" onClick={() => void report(invoke("cancel_download", { gameId: item.gameId }))}><X size={16} /></button>}
                       {item.status === "installed" && <span className="completed-mark"><Check size={16} /> READY</span>}
                     </div></div>
@@ -399,7 +400,7 @@ function App() {
             <h2 id="download-title">Download {modalGame.title}</h2>
             <p className="modal-copy">Choose an available game file and where Redline should install it. The download runs in the background and can be managed from Downloads.</p>
             {modalInstallableFiles.length > 0 && <><label className="field-label" htmlFor="download-file">GAME FILE</label><select id="download-file" className="file-picker" value={selectedFileName ?? ""} onChange={(event) => setSelectedFileName(event.target.value)}>
-            {modalInstallableFiles.map((file) => <option key={file.fileName} value={file.fileName}>{file.fileName} — {[file.size, file.platforms.join(", ")].filter(Boolean).join(" · ") || "platform not specified"}</option>)}
+              {modalInstallableFiles.map((file) => <option key={file.fileName} value={file.fileName}>{file.fileName} — {[file.size, file.platforms.join(", ")].filter(Boolean).join(" · ") || "platform not specified"}</option>)}
             </select></>}
             <label className="field-label">INSTALL LOCATION</label>
             <div className="folder-picker"><span title={folder}>{folder || "Choose a folder on this device"}</span><button onClick={() => void chooseFolder()}><Plus size={15} /> BROWSE</button></div>

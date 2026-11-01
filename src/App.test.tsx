@@ -132,6 +132,33 @@ describe("library install workflow", () => {
     expect(screen.getByRole("button", { name: "DOWNLOAD GAME" })).toBeTruthy();
   });
 
+  it("offers the selected desktop download for a browser-only listing", async () => {
+    const user = userEvent.setup();
+    const platformGame: Game = {
+      ...stillwater,
+      id: 13,
+      slug: "test-2",
+      title: "Test 2",
+      creator: "Test Creator",
+      downloadUrl: "https://gofile.io/d/bZPEjqpB",
+      browserOnly: true,
+      files: [],
+    };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_games") return [platformGame];
+      if (command === "list_downloads") return [];
+      if (command === "list_library") return [];
+      if (command === "refresh_game_files") return [];
+      if (command === "start_download") return undefined;
+      throw new Error(`Unexpected Tauri command: ${command}`);
+    });
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /Test 2/ }));
+    await user.click(await screen.findByRole("button", { name: "DOWNLOAD GAME" }));
+    expect(screen.getByRole("heading", { name: "Download Test 2" })).toBeTruthy();
+  });
+
   it("offers Play and launches when the install is still available", async () => {
     const user = userEvent.setup();
     library = [{
