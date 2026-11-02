@@ -1,6 +1,7 @@
 [
     {
         "name": "Game 01",
+        "thumbnail": "https://attachments.f95zone.to/2026/08/6367911_1786469712398.png",
         "download_links": {
             "pixeldrain": "https://pixeldrain.com/u/rNN48Qfi"
         },
@@ -27,6 +28,7 @@
     },
     {
         "name": "Game 02",
+        "thumbnail": "https://attachments.f95zone.to/2026/10/6660629_Header.jpg",
         "download_links": {
             "pixeldrain": "https://pixeldrain.com/u/iBsrkcMx"
         },
@@ -34,6 +36,7 @@
     },
     {
         "name": "Game 03",
+        "thumbnail": "https://attachments.f95zone.to/2026/09/6464020_bannerdonelogo.jpg",
         "download_links": {
             "workupload": "https://workupload.com/file/PXX9FnqHYeE"
         },
@@ -41,6 +44,7 @@
     },
     {
         "name": "Game 04 - FC",
+        "thumbnail": "https://attachments.f95zone.to/2025/06/4962330_1749710659880.png",
         "download_links": {
             "gofile": "https://gofile.io/d/PlfkpS"
         },
@@ -54,7 +58,8 @@
                     {
                         "type": "extract",
                         "target_folder": "."
-                    },{
+                    },
+                    {
                         "type": "move",
                         "source_folder": "./game",
                         "target_folder": "%GAME_ROOT%/game"
@@ -75,8 +80,10 @@
                 ]
             }
         ]
-    },{
+    },
+    {
         "name": "goodluke",
+        "thumbnail": "https://attachments.f95zone.to/2026/01/5645229_Good_Luke_The_Game_-_Visual_Key.jpg",
         "download_links": {
             "pixeldrain": "https://pixeldrain.com/u/YgeVHBw4"
         },
@@ -93,7 +100,8 @@
                         "target_folder": "%GAME_ROOT%/game"
                     }
                 ]
-            },{
+            },
+            {
                 "name": "Gallery Unlocker",
                 "download_links": {
                     "direct_link": "https://attachments.f95zone.to/2026/10/6606467_GoodLuke_Gallery_Unlock.zip"
