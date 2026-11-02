@@ -235,49 +235,67 @@ class DownloaderEngine:
             direct_url = self._get_direct_download_url(url, source)
             print(f"Downloading {item_name or destination.name} from {source}...")
 
-            if source in {"workupload", "gofile"}:
+            if source == "gofile":
+                self._download_browser_host(
+                    url, destination, progress_callback, item_name
+                )
+                return True
+
+            if source == "workupload":
                 self._download_browser_host(
                     direct_url, destination, progress_callback, item_name
                 )
                 return True
 
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-
-            with requests.get(
-                direct_url, headers=headers, stream=True, timeout=30
-            ) as response:
-                response.raise_for_status()
-                content_type = response.headers.get('content-type', '').lower()
-                if 'text/html' in content_type or 'application/json' in content_type:
-                    raise ValueError(
-                        "The URL returned a web page instead of a file. "
-                        "Use a direct download URL; interactive host pages are not supported."
-                    )
-
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
-                progress_reported = False
-                with destination.open('wb') as file:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            file.write(chunk)
-                            downloaded += len(chunk)
-                            self._print_progress(downloaded, total_size)
-                            progress_reported = True
-                            if progress_callback:
-                                progress_callback(downloaded, total_size)
-
-                if progress_reported:
-                    print()
-                print(f"Downloaded {item_name or destination.name} to {destination}.")
+            self._download_direct_file(
+                direct_url, destination, progress_callback, item_name
+            )
             return True
         except (requests.RequestException, OSError, ValueError) as e:
             print(f"Download failed: {e}")
             if destination.exists():
                 destination.unlink()
             return False
+
+    def _download_direct_file(
+        self,
+        url: str,
+        destination: Path,
+        progress_callback: Optional[Callable[[int, int], None]],
+        item_name: Optional[str],
+    ) -> None:
+        """Stream a direct file URL to disk and report download progress."""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+        with requests.get(
+            url, headers=headers, stream=True, timeout=30
+        ) as response:
+            response.raise_for_status()
+            content_type = response.headers.get('content-type', '').lower()
+            if 'text/html' in content_type or 'application/json' in content_type:
+                raise ValueError(
+                    "The URL returned a web page instead of a file. "
+                    "Use a direct download URL; interactive host pages are not supported."
+                )
+
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            progress_reported = False
+            with destination.open('wb') as file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        file.write(chunk)
+                        downloaded += len(chunk)
+                        self._print_progress(downloaded, total_size)
+                        progress_reported = True
+                        if progress_callback:
+                            progress_callback(downloaded, total_size)
+
+            if progress_reported:
+                print()
+            print(f"Downloaded {item_name or destination.name} to {destination}.")
 
     def extract_zip(self, zip_path: Path, extract_to: Path) -> bool:
         """Extract zip file to destination folder."""

@@ -6,6 +6,9 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
+
+import requests
 
 if __package__:
     from .downloader_engine import DownloaderEngine
@@ -31,9 +34,33 @@ class GameDownloaderCLI:
         self.games: List[Dict[str, Any]] = []
 
     def load_games(self) -> None:
-        """Read game definitions from a JSON object or list of objects."""
-        with self.games_json_path.open(encoding="utf-8") as file:
-            data = json.load(file)
+        """Read game definitions locally or fetch them if the file is missing."""
+        if self.games_json_path.exists():
+            with self.games_json_path.open(encoding="utf-8") as file:
+                data = json.load(file)
+        else:
+            data = self._fetch_games_json()
+
+        self.games = self._validate_games_data(data)
+
+    def _fetch_games_json(self) -> Any:
+        """Prompt for and fetch the missing games JSON document."""
+        url = input(
+            f"Games file not found at {self.games_json_path}. "
+            "Enter an HTTPS URL to fetch games.json: "
+        ).strip()
+        parsed_url = urlparse(url)
+        if parsed_url.scheme.lower() != "https" or not parsed_url.netloc:
+            raise ValueError("The games JSON URL must be a valid HTTPS URL.")
+
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        self._validate_games_data(data)
+        return data
+
+    def _validate_games_data(self, data: Any) -> List[Dict[str, Any]]:
+        """Validate and normalize game definitions from a JSON document."""
         games = data if isinstance(data, list) else [data]
         if not games:
             raise ValueError(f"No games are configured in {self.games_json_path}.")
@@ -44,7 +71,7 @@ class GameDownloaderCLI:
                 raise ValueError(f"Game '{game['name']}' has no download_links object.")
             if not isinstance(game.get("mods", []), list):
                 raise ValueError(f"Game '{game['name']}' must have a mods list.")
-        self.games = games
+        return games
 
     def select_game(self) -> Optional[Dict[str, Any]]:
         print("Available games:")
@@ -159,7 +186,12 @@ class GameDownloaderCLI:
     def run(self) -> int:
         try:
             self.load_games()
-        except (OSError, json.JSONDecodeError, ValueError) as error:
+        except (
+            OSError,
+            requests.RequestException,
+            json.JSONDecodeError,
+            ValueError,
+        ) as error:
             print(f"Could not load games: {error}", file=sys.stderr)
             return 1
 

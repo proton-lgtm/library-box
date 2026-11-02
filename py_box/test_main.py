@@ -116,29 +116,27 @@ class ArchiveExtractionTests(unittest.TestCase):
             "gofile",
         )
 
-    def test_browser_host_download_uses_python_streaming(self):
+    def test_gofile_uses_browser_without_api(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
             downloader = DownloaderEngine(temporary_directory)
-            output = io.StringIO()
-            progress = []
+            destination = Path(temporary_directory) / "game.zip"
 
-            with patch.object(downloader, "_download_browser_host") as browser_download:
-                with patch("downloader_engine.requests.get") as request_get:
-                    with contextlib.redirect_stdout(output):
-                        downloaded = downloader.download_file(
-                            "https://gofile.io/d/example",
-                            root / "game.zip",
-                            lambda current, total: progress.append((current, total)),
-                        )
+            with patch.object(
+                downloader, "_download_direct_file"
+            ) as stream_file, patch.object(
+                downloader, "_download_browser_host"
+            ) as browser:
+                downloaded = downloader.download_file(
+                    "https://gofile.io/d/share-code",
+                    destination,
+                    item_name="Game",
+                )
 
             self.assertTrue(downloaded)
-            self.assertEqual(browser_download.call_args.args[0], "https://gofile.io/d/example")
-            self.assertEqual(browser_download.call_args.args[1], root / "game.zip")
-            self.assertTrue(callable(browser_download.call_args.args[2]))
-            self.assertIsNone(browser_download.call_args.args[3])
-            request_get.assert_not_called()
-            self.assertIn("from gofile", output.getvalue())
+            browser.assert_called_once_with(
+                "https://gofile.io/d/share-code", destination, None, "Game"
+            )
+            stream_file.assert_not_called()
 
     def test_browser_host_download_streams_with_browser_cookies_and_progress(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
