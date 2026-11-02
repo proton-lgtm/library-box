@@ -8,6 +8,9 @@ import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import py7zr
+import rarfile
+
 from downloader_engine import DownloaderEngine
 from main import GameDownloaderCLI
 from mod_manager import ModManager
@@ -308,6 +311,29 @@ class ArchiveExtractionTests(unittest.TestCase):
             self.assertTrue((downloader.game_folder / "game.zip").exists())
             self.assertEqual((game_root / "readme.txt").read_text(), "installed")
 
+    def test_downloads_and_extracts_7z_game_archive(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "readme.txt"
+            source.write_text("installed")
+            downloader = DownloaderEngine(str(root))
+
+            def create_game_archive(_url, destination, **_kwargs):
+                with py7zr.SevenZipFile(destination, "w") as archive_file:
+                    archive_file.write(source, "game/readme.txt")
+                return True
+
+            with patch.object(
+                downloader, "download_file", side_effect=create_game_archive
+            ):
+                game_root = downloader.download_and_extract_game(
+                    "Example", "https://example.com/game.7z"
+                )
+
+            self.assertIsNotNone(game_root)
+            self.assertTrue((downloader.game_folder / "game.zip").exists())
+            self.assertEqual((game_root / "readme.txt").read_text(), "installed")
+
     def test_reuses_existing_game_archive_without_downloading(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             downloader = DownloaderEngine(temporary_directory)
@@ -355,6 +381,119 @@ class ArchiveExtractionTests(unittest.TestCase):
             self.assertEqual(
                 (root / "extracted" / "game" / "readme.txt").read_text(),
                 "installed",
+            )
+
+    def test_extracts_valid_7z_archive(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "readme.txt"
+            source.write_text("installed")
+            archive = root / "valid.7z"
+            with py7zr.SevenZipFile(archive, "w") as archive_file:
+                archive_file.write(source, "game/readme.txt")
+
+            self.assertTrue(
+                DownloaderEngine(str(root)).extract_zip(
+                    archive, root / "extracted"
+                )
+            )
+            self.assertEqual(
+                (root / "extracted" / "game" / "readme.txt").read_text(),
+                "installed",
+            )
+
+    def test_routes_rar_archive_to_rarfile(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            archive_path = root / "valid.rar"
+            archive_path.touch()
+            member = MagicMock()
+            member.filename = "game/readme.txt"
+            member.is_symlink.return_value = False
+            archive = MagicMock()
+            archive.__enter__.return_value = archive
+            archive.infolist.return_value = [member]
+            rar_file = MagicMock(return_value=archive)
+
+            with patch("downloader_engine.rarfile.is_rarfile", return_value=True), patch(
+                "downloader_engine.rarfile.RarFile", rar_file
+            ):
+                extracted = DownloaderEngine(str(root)).extract_zip(
+                    archive_path, root / "extracted"
+                )
+
+            self.assertTrue(extracted)
+            archive.extractall.assert_called_once_with(path=(root / "extracted").resolve())
+
+    def test_rejects_unsafe_rar_member_path(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            archive_path = root / "unsafe.rar"
+            archive_path.touch()
+            member = MagicMock()
+            member.filename = "../outside.txt"
+            member.is_symlink.return_value = False
+            archive = MagicMock()
+            archive.__enter__.return_value = archive
+            archive.infolist.return_value = [member]
+
+            with patch("downloader_engine.rarfile.is_rarfile", return_value=True), patch(
+                "downloader_engine.rarfile.RarFile", return_value=archive
+            ), contextlib.redirect_stdout(io.StringIO()):
+                extracted = DownloaderEngine(str(root)).extract_zip(
+                    archive_path, root / "extracted"
+                )
+
+            self.assertFalse(extracted)
+            archive.extractall.assert_not_called()
+            self.assertFalse((root / "outside.txt").exists())
+
+    def test_reports_missing_rar_extractor(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            archive_path = root / "valid.rar"
+            archive_path.touch()
+            output = io.StringIO()
+
+            with patch("downloader_engine.rarfile.is_rarfile", return_value=True), patch(
+                "downloader_engine.rarfile.RarFile",
+                side_effect=rarfile.RarCannotExec("extractor missing"),
+            ), contextlib.redirect_stdout(output):
+                extracted = DownloaderEngine(str(root)).extract_archive(
+                    archive_path, root / "extracted"
+                )
+
+            self.assertFalse(extracted)
+            self.assertIn("install 7-Zip or UnRAR", output.getvalue())
+
+    def test_applies_7z_mod_archive(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "readme.txt"
+            source.write_text("installed")
+            archive = root / "mod.7z"
+            with py7zr.SevenZipFile(archive, "w") as archive_file:
+                archive_file.write(source, "game/readme.txt")
+            game_root = root / "installed_game"
+            game_root.mkdir()
+            manager = ModManager(DownloaderEngine(str(root)))
+
+            applied = manager._apply_mod_steps(
+                archive,
+                game_root,
+                [
+                    {
+                        "type": "move",
+                        "source_folder": "game",
+                        "target_folder": "%GAME_ROOT%/game",
+                    }
+                ],
+                "7z Mod",
+            )
+
+            self.assertTrue(applied)
+            self.assertEqual(
+                (game_root / "game" / "readme.txt").read_text(), "installed"
             )
 
     def test_applies_configured_extract_and_move_steps(self):

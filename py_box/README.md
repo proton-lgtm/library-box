@@ -24,6 +24,10 @@ streams the verified file in the terminal with a progress bar. Mods may also
 use a `direct_link` URL; non-ZIP file mods are copied into their configured
 `target_folder`.
 
+ZIP and 7z archives are extracted directly. RAR extraction uses `rarfile` and
+requires 7-Zip or UnRAR to be installed and available on `PATH`. The same
+archive support is used for game downloads, mods, and nested archives.
+
 Install the Python dependencies and Playwright's Chromium browser once:
 
 ```powershell

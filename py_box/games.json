@@ -75,5 +75,41 @@
                 ]
             }
         ]
+    },{
+        "name": "goodluke",
+        "download_links": {
+            "pixeldrain": "https://pixeldrain.com/u/YgeVHBw4"
+        },
+        "mods": [
+            {
+                "name": "I-Patch",
+                "file_type": "rpy",
+                "download_links": {
+                    "direct_link": "https://attachments.f95zone.to/2026/10/6647674_zzGoodLuke_ipatch_v1.3.rpy"
+                },
+                "steps_to_apply": [
+                    {
+                        "type": "move",
+                        "target_folder": "%GAME_ROOT%/game"
+                    }
+                ]
+            },{
+                "name": "Gallery Unlocker",
+                "download_links": {
+                    "direct_link": "https://attachments.f95zone.to/2026/10/6606467_GoodLuke_Gallery_Unlock.zip"
+                },
+                "steps_to_apply": [
+                    {
+                        "type": "extract",
+                        "target_folder": "."
+                    },
+                    {
+                        "type": "move",
+                        "source_folder": "./game",
+                        "target_folder": "%GAME_ROOT%/game"
+                    }
+                ]
+            }
+        ]
     }
 ]

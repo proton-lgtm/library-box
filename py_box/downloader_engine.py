@@ -1,12 +1,19 @@
 """Downloader engine for handling game/mod downloads from various sources."""
 
 import re
+import stat
 import zipfile
 import requests
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Optional
 from urllib.parse import urlparse
+
+import py7zr
+import rarfile
+
+
+SUPPORTED_ARCHIVE_SUFFIXES = frozenset({".zip", ".7z", ".rar"})
 
 
 class DownloaderEngine:
@@ -297,22 +304,94 @@ class DownloaderEngine:
                 print()
             print(f"Downloaded {item_name or destination.name} to {destination}.")
 
-    def extract_zip(self, zip_path: Path, extract_to: Path) -> bool:
-        """Extract zip file to destination folder."""
+    @staticmethod
+    def _validate_archive_members(
+        members: list[tuple[str, bool]], extract_to: Path
+    ) -> Path:
+        """Reject archive paths and links that could escape the extraction folder."""
+        root = extract_to.resolve()
+        for filename, is_symlink in members:
+            member_path = PurePosixPath(filename.replace("\\", "/"))
+            windows_path = PureWindowsPath(filename)
+            if (
+                member_path.is_absolute()
+                or windows_path.is_absolute()
+                or windows_path.drive
+                or ".." in member_path.parts
+                or is_symlink
+            ):
+                raise ValueError(f"Archive contains an unsafe path: {filename}")
+
+            target = root.joinpath(*member_path.parts).resolve()
+            if target != root and root not in target.parents:
+                raise ValueError(f"Archive contains an unsafe path: {filename}")
+        return root
+
+    @staticmethod
+    def is_supported_archive(archive_path: Path) -> bool:
+        """Return whether a file has a supported ZIP, 7z, or RAR archive signature."""
+        if not archive_path.is_file():
+            return False
+        return (
+            zipfile.is_zipfile(archive_path)
+            or py7zr.is_7zfile(archive_path)
+            or rarfile.is_rarfile(archive_path)
+        )
+
+    def extract_archive(self, archive_path: Path, extract_to: Path) -> bool:
+        """Extract a ZIP, 7z, or RAR archive to the destination folder."""
         try:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                root = extract_to.resolve()
-                for member in zip_ref.infolist():
-                    target = (root / member.filename).resolve()
-                    if target != root and root not in target.parents:
-                        raise ValueError(
-                            f"Archive contains an unsafe path: {member.filename}"
+            extract_to.mkdir(parents=True, exist_ok=True)
+            root = extract_to.resolve()
+            if zipfile.is_zipfile(archive_path):
+                with zipfile.ZipFile(archive_path, "r") as archive:
+                    members = [
+                        (
+                            member.filename,
+                            stat.S_ISLNK(member.external_attr >> 16),
                         )
-                zip_ref.extractall(root)
+                        for member in archive.infolist()
+                    ]
+                    self._validate_archive_members(members, root)
+                    archive.extractall(root)
+            elif py7zr.is_7zfile(archive_path):
+                with py7zr.SevenZipFile(archive_path, "r") as archive:
+                    members = [
+                        (member.filename, member.is_symlink)
+                        for member in archive.list()
+                    ]
+                    self._validate_archive_members(members, root)
+                    archive.extractall(path=root)
+            elif rarfile.is_rarfile(archive_path):
+                with rarfile.RarFile(archive_path, "r") as archive:
+                    members = [
+                        (member.filename, member.is_symlink())
+                        for member in archive.infolist()
+                    ]
+                    self._validate_archive_members(members, root)
+                    archive.extractall(path=root)
+            else:
+                raise ValueError("File is not a supported ZIP, 7z, or RAR archive.")
             return True
-        except (OSError, ValueError, zipfile.BadZipFile) as e:
+        except rarfile.RarCannotExec as error:
+            print(
+                "RAR extraction failed: install 7-Zip or UnRAR and ensure "
+                f"it is available on PATH. Details: {error}"
+            )
+            return False
+        except (
+            OSError,
+            ValueError,
+            zipfile.BadZipFile,
+            py7zr.exceptions.ArchiveError,
+            rarfile.Error,
+        ) as e:
             print(f"Extraction failed: {e}")
             return False
+
+    def extract_zip(self, zip_path: Path, extract_to: Path) -> bool:
+        """Compatibility wrapper for callers using the original ZIP extractor."""
+        return self.extract_archive(zip_path, extract_to)
 
     def download_and_extract_game(self, game_name: str, download_url: str) -> Optional[Path]:
         """Download and extract a game. Returns game root folder path."""
@@ -326,7 +405,7 @@ class DownloaderEngine:
             return None
 
         print(f"Extracting {game_name} from {zip_path}...")
-        if not self.extract_zip(zip_path, game_folder):
+        if not self.extract_archive(zip_path, game_folder):
             return None
 
         print(f"Keeping game archive at {zip_path}.")

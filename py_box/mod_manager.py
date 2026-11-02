@@ -1,14 +1,13 @@
 """Mod manager for applying game mods."""
 
 import shutil
-import zipfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 if __package__:
-    from .downloader_engine import DownloaderEngine
+    from .downloader_engine import DownloaderEngine, SUPPORTED_ARCHIVE_SUFFIXES
 else:
-    from downloader_engine import DownloaderEngine
+    from downloader_engine import DownloaderEngine, SUPPORTED_ARCHIVE_SUFFIXES
 
 
 class ModManager:
@@ -72,11 +71,14 @@ class ModManager:
         try:
             # First, extract the mod archive
             print(f"  Extracting mod archive: {mod_archive.name}")
-            if zipfile.is_zipfile(mod_archive):
-                if not self.downloader.extract_zip(mod_archive, temp_extract):
+            if self.downloader.is_supported_archive(mod_archive):
+                if not self.downloader.extract_archive(mod_archive, temp_extract):
                     return False
-            elif mod_archive.suffix.lower() == ".zip":
-                print(f"  Mod archive is not a valid ZIP file: {mod_archive.name}")
+            elif mod_archive.suffix.lower() in SUPPORTED_ARCHIVE_SUFFIXES:
+                print(
+                    f"  Mod archive is not a valid supported archive: "
+                    f"{mod_archive.name}"
+                )
                 return False
             else:
                 return self._apply_single_file_mod(
@@ -139,11 +141,14 @@ class ModManager:
         target_path = self._resolve_path(game_root, target_folder, game_root)
         target_path.mkdir(parents=True, exist_ok=True)
 
-        # Look for nested archives in mod_root
-        for archive in mod_root.rglob('*.zip'):
-            print(f"  Extracting nested archive: {archive.name}")
-            if not self.downloader.extract_zip(archive, target_path):
-                return False
+        for archive in mod_root.rglob("*"):
+            if (
+                archive.is_file()
+                and archive.suffix.lower() in SUPPORTED_ARCHIVE_SUFFIXES
+            ):
+                print(f"  Extracting nested archive: {archive.name}")
+                if not self.downloader.extract_archive(archive, target_path):
+                    return False
         return True
 
     def _handle_move_step(self, mod_root: Path, game_root: Path, source_folder: str, target_folder: str) -> bool:
