@@ -1,56 +1,48 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArrowDownToLine,
   ArrowLeft,
-  ArrowUpRight,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleAlert,
-  CirclePlay,
-  Download,
+  Download as DownloadIcon,
   Gamepad2,
   HardDriveDownload,
   Home,
   Library,
-  LoaderCircle,
   Pause,
   Play,
-  Plus,
   Search,
-  ShieldCheck,
-  StopCircle,
+  ShoppingBag,
+  Square,
   X,
 } from "lucide-react";
-import type { Download as DownloadItem, DownloadProgress as ProgressEvent, Game, GameFile, InstalledGame } from "./types";
-import { formatBytes as prettySize } from "./utils";
+import type { Download, Game, InstalledGame } from "./shared/types";
 
-type Page = "home" | "library" | "downloads";
-const LAST_INSTALL_FOLDER_KEY = "redline.last-install-folder";
+type Page = "home" | "downloads" | "library";
+const INSTALL_FOLDER_KEY = "redline.install-folder";
 
-function Cover({
-  src,
-  title,
-  className = "",
-}: {
-  src: string;
-  title: string;
-  className?: string;
-}) {
+function bestDownloadLink(game: Game): string | undefined {
+  const priority = ["direct_link", "pixeldrain", "gofile", "workupload", "direct"];
+  for (const key of priority) {
+    if (game.downloadLinks[key]) return game.downloadLinks[key];
+  }
+  return Object.values(game.downloadLinks)[0];
+}
+
+function Cover({ game, className = "" }: { game: Game; className?: string }) {
   const [failed, setFailed] = useState(false);
-  return failed || !src ? (
-    <div className={`cover-fallback ${className}`}>
-      <Gamepad2 size={34} />
-      <span>{title}</span>
+  return failed || !game.thumbnail ? (
+    <div className={`cover-fallback ${className}`} aria-label={`${game.name} cover`}>
+      <Gamepad2 size={30} />
+      <span>{game.name}</span>
     </div>
   ) : (
     <img
       className={className}
-      src={src}
-      alt={`${title} cover`}
+      src={game.thumbnail}
+      alt={`${game.name} cover`}
       loading="lazy"
       onError={() => setFailed(true)}
     />
@@ -59,34 +51,38 @@ function Cover({
 
 function App() {
   const [games, setGames] = useState<Game[]>([]);
-  const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const [downloads, setDownloads] = useState<Download[]>([]);
   const [library, setLibrary] = useState<InstalledGame[]>([]);
   const [page, setPage] = useState<Page>("home");
+  const [storeFocused, setStoreFocused] = useState(false);
   const [selected, setSelected] = useState<Game | null>(null);
-  const [query, setQuery] = useState("");
-  const [busy, setBusy] = useState(true);
-  const [error, setError] = useState("");
-  const [actionError, setActionError] = useState("");
-  const [modalGame, setModalGame] = useState<Game | null>(null);
-  const [folder, setFolder] = useState(() => localStorage.getItem(LAST_INSTALL_FOLDER_KEY) ?? "");
+  const [search, setSearch] = useState("");
+  const [destination, setDestination] = useState(
+    () => localStorage.getItem(INSTALL_FOLDER_KEY) ?? "",
+  );
   const [runAfter, setRunAfter] = useState(false);
+  const [selectedModIds, setSelectedModIds] = useState<number[]>([]);
+  const [downloadDialog, setDownloadDialog] = useState(false);
+  const [busy, setBusy] = useState(true);
   const [starting, setStarting] = useState(false);
-  const [filesLoading, setFilesLoading] = useState(false);
-  const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
+  const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
     try {
-      const nextLibrary = await invoke<InstalledGame[]>("list_library");
-      const [nextGames, nextDownloads] = await Promise.all([
-        invoke<Game[]>("list_games"),
-        invoke<DownloadItem[]>("list_downloads"),
+      const [nextGames, nextDownloads, nextLibrary] = await Promise.all([
+        window.library.listGames(),
+        window.library.listDownloads(),
+        window.library.listLibrary(),
       ]);
       setGames(nextGames);
       setDownloads(nextDownloads);
       setLibrary(nextLibrary);
+      setSelected((current) =>
+        current ? nextGames.find((game) => game.id === current.id) ?? null : null,
+      );
       setError("");
-    } catch (e) {
-      setError(String(e));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
     }
@@ -94,328 +90,478 @@ function App() {
 
   useEffect(() => {
     void refresh();
-  }, [page, refresh]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => void refresh(), 3000);
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    void listen<ProgressEvent>("download-progress", (event) => {
-      const update = event.payload;
-      setDownloads((items) =>
-        items.map((item) =>
-          item.gameId === update.gameId
-            ? {
-              ...item,
-              status: update.status,
-              bytesDownloaded: update.bytesDownloaded,
-              totalBytes: update.totalBytes,
-              error: update.error,
-            }
-            : item,
-        ),
-      );
-      void refresh();
-    }).then((stop) => {
-      if (active) unlisten = stop;
-      else stop();
-    });
+    const unsubscribe = window.library.onDownloadUpdate(() => void refresh());
+    const timer = window.setInterval(() => void refresh(), 2500);
     return () => {
-      active = false;
+      unsubscribe();
       window.clearInterval(timer);
-      unlisten?.();
     };
   }, [refresh]);
 
   useEffect(() => {
-    if (folder) localStorage.setItem(LAST_INSTALL_FOLDER_KEY, folder);
-  }, [folder]);
+    if (destination) localStorage.setItem(INSTALL_FOLDER_KEY, destination);
+  }, [destination]);
 
   useEffect(() => {
-    if (!selected) return;
-    let active = true;
-    setFilesLoading(true);
-    setSelectedFileName(null);
-    void invoke<GameFile[]>("refresh_game_files", { gameId: selected.id })
-      .then((files) => {
-        if (!active) return;
-        setGames((items) => items.map((game) => game.id === selected.id ? { ...game, files } : game));
-        setSelected((game) => game?.id === selected.id ? { ...game, files } : game);
-        setSelectedFileName(files.find((file) => file.installable)?.fileName ?? null);
-      })
-      .catch((e: unknown) => {
-        if (active) setActionError(`Could not check itch.io downloads: ${String(e)}`);
-      })
-      .finally(() => {
-        if (active) setFilesLoading(false);
-      });
-    return () => { active = false; };
-  }, [selected?.id]);
+    if (page === "home" && storeFocused) {
+      document.getElementById("store-section")?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [page, storeFocused]);
 
   const filteredGames = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return games;
-    return games.filter((game) =>
-      `${game.title} ${game.creator} ${game.genre}`.toLowerCase().includes(normalized),
-    );
-  }, [games, query]);
+    const query = search.trim().toLowerCase();
+    return query
+      ? games.filter((game) => game.name.toLowerCase().includes(query))
+      : games;
+  }, [games, search]);
+  const installedIds = useMemo(() => new Set(library.map((game) => game.id)), [library]);
+  const activeDownloads = downloads.filter((item) =>
+    item.status === "downloading" || item.status === "paused",
+  );
+  const totalDownloadBytes = activeDownloads.reduce(
+    (total, item) => total + item.bytesDownloaded,
+    0,
+  );
+  const totalKnownDownloadBytes = activeDownloads.reduce(
+    (total, item) => total + (item.totalBytes ?? 0),
+    0,
+  );
+  const downloadProgress = totalKnownDownloadBytes
+    ? Math.min(100, totalDownloadBytes / totalKnownDownloadBytes * 100)
+    : 0;
 
-  const installedGameIds = useMemo(() => new Set(library.map((game) => game.gameId)), [library]);
-  const topGame = selected ?? games[0];
-  const selectedInstalled = selected !== null && installedGameIds.has(selected.id);
-  const installableFiles = selected?.files.filter((file) => file.installable) ?? [];
-  const modalInstallableFiles = modalGame?.files.filter((file) => file.installable) ?? [];
-  const activeCount = downloads.filter((item) =>
-    ["downloading", "paused", "failed"].includes(item.status),
-  ).length;
-
-  const report = (operation: Promise<unknown>) =>
-    operation
-      .then(() => {
-        setActionError("");
-        return refresh();
-      })
-      .catch((e: unknown) => setActionError(String(e)));
+  const chooseDestination = async () => {
+    try {
+      const result = await window.library.chooseDestination();
+      if (result) setDestination(result);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
 
   const beginDownload = async () => {
-    if (!modalGame || !folder) return;
+    if (!selected || !destination) return;
+    const url = bestDownloadLink(selected);
+    if (!url) {
+      setError("This game has no configured download link.");
+      return;
+    }
     setStarting(true);
     try {
-      await invoke("start_download", {
-        gameId: modalGame.id,
-        destination: folder,
+      await window.library.startDownload({
+        gameId: selected.id,
+        url,
+        destination,
         runAfter,
-        fileName: selectedFileName,
-        uploadId: modalGame.files.find((file) => file.fileName === selectedFileName)?.uploadId ?? null,
+        selectedModIds,
       });
-      setModalGame(null);
+      setDownloadDialog(false);
       setRunAfter(false);
-      setSelected(null);
+      setSelectedModIds([]);
       setPage("downloads");
-      setActionError("");
+      setSelected(null);
       await refresh();
-    } catch (e) {
-      setActionError(String(e));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setStarting(false);
     }
   };
 
-  const chooseFolder = async () => {
+  const runAction = async (action: () => Promise<void>) => {
     try {
-      const choice = await open({ directory: true, multiple: false, title: "Choose game install folder" });
-      if (typeof choice === "string") setFolder(choice);
-    } catch (e) {
-      setActionError(`Could not open folder picker: ${String(e)}`);
+      await action();
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     }
   };
 
-  const openGame = (game: Game) => {
-    setSelected(game);
-    setPage("home");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  const navigate = (next: Page) => {
+    setSelected(null);
+    setPage(next);
+    setStoreFocused(false);
   };
 
-  const goBack = () => {
+  const openStore = () => {
     setSelected(null);
-    setActionError("");
+    setPage("home");
+    setStoreFocused(true);
   };
+
+  const featuredGame = filteredGames[0];
+  const featuredInstalled = featuredGame ? installedIds.has(featuredGame.id) : false;
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <button className="brand" onClick={() => { setPage("home"); goBack(); }} aria-label="Redline home">
-          <span className="brand-mark"><Gamepad2 size={21} /></span>
-          <span>RED<span className="brand-red">LINE</span><small>GAME HUB</small></span>
+        <button className="brand" onClick={() => navigate("home")} aria-label="Redline home">
+          <span className="brand-mark"><i /></span>
+          <span className="brand-wordmark">REDLINE<small>GAME LIBRARY</small></span>
         </button>
 
-        <div className="nav-label">YOUR SPACE</div>
         <nav className="primary-nav" aria-label="Main navigation">
-          <button className={page === "home" && !selected ? "nav-item active" : "nav-item"} onClick={() => { setPage("home"); goBack(); }}>
-            <Home size={18} /> Discover
+          <div className="nav-section-label">DISCOVER</div>
+          <button
+            className={!selected && page === "home" && !storeFocused ? "nav-item active" : "nav-item"}
+            onClick={() => navigate("home")}
+          >
+            <Home size={17} /> Home
           </button>
-          <button className={page === "library" ? "nav-item active" : "nav-item"} onClick={() => { setPage("library"); goBack(); }}>
-            <Library size={18} /> My Library <span className="nav-count">{library.length}</span>
+          <button
+            className={!selected && page === "home" && storeFocused ? "nav-item nav-store active" : "nav-item nav-store"}
+            onClick={openStore}
+          >
+            <ShoppingBag size={17} /> Store <ChevronDown className="nav-chevron" size={14} />
           </button>
-          <button className={page === "downloads" ? "nav-item active" : "nav-item"} onClick={() => { setPage("downloads"); goBack(); }}>
-            <ArrowDownToLine size={18} /> Downloads
-            {activeCount > 0 && <span className="nav-count nav-alert">{activeCount}</span>}
+          <button
+            className={!selected && page === "downloads" ? "nav-item active" : "nav-item"}
+            onClick={() => navigate("downloads")}
+          >
+            <ArrowDownToLine size={17} /> Downloads
+            {activeDownloads.length > 0 && (
+              <span className="nav-count">{activeDownloads.length}</span>
+            )}
+          </button>
+
+          <div className="nav-section-label nav-section-library">COLLECTION</div>
+          <button
+            className={!selected && page === "library" ? "nav-item active" : "nav-item"}
+            onClick={() => navigate("library")}
+          >
+            <Library size={17} /> Library <ChevronDown className="nav-chevron" size={14} />
+            <span className="nav-count">{library.length}</span>
           </button>
         </nav>
 
         <div className="sidebar-bottom">
-          <div className="status-card">
-            <ShieldCheck size={17} />
-            <span><strong>Local first</strong><small>Your library stays on this device</small></span>
+          <button
+            className="download-summary"
+            onClick={() => navigate("downloads")}
+            aria-label="Open download queue"
+          >
+            <span className="download-summary-heading">
+              <span>Downloads</span>
+              <span>{activeDownloads.length} active</span>
+            </span>
+            <span className="sidebar-progress">
+              <i style={{ width: `${downloadProgress}%` }} />
+            </span>
+            <span className="download-summary-foot">
+              {activeDownloads.length
+                ? `${formatBytes(totalDownloadBytes)} transferred`
+                : "Your queue is clear"}
+              <ChevronRight size={13} />
+            </span>
+          </button>
+          <div className="sidebar-foot">
+            <span className="brand-mark brand-mark-small"><i /></span>
+            <span><strong>Redline Library</strong><small>LOCAL COLLECTION</small></span>
+            <span className="online-dot" />
           </div>
-          <div className="sidebar-foot"><span className="online-dot" /> REDLINE DESKTOP <span>v0.1.0</span></div>
         </div>
       </aside>
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumb"><span>REDLINE</span><ChevronRight size={14} /><strong>{selected ? "GAME DETAILS" : page.toUpperCase()}</strong></div>
           <label className="search-box">
             <Search size={17} />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search games..." />
-            <kbd>⌘ K</kbd>
+            <input
+              aria-label="Search games"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search for games..."
+            />
+            <kbd>⌕</kbd>
           </label>
-          <button className="avatar" title="Local profile">R</button>
+          <div className="topbar-spacer" />
+          <div className="local-pill"><span className="online-dot" /> LOCAL LIBRARY</div>
+          <div className="profile-pill">
+            <span className="profile-icon">L</span>
+            <span><strong>Local profile</strong><small>On this device</small></span>
+            <ChevronDown size={14} />
+          </div>
         </header>
 
-        {error && <div className="error-banner"><CircleAlert size={17} /> {error}</div>}
-        {actionError && <div className="toast-error"><CircleAlert size={17} /> <span>{actionError}</span><button onClick={() => setActionError("")} aria-label="Dismiss"><X size={15} /></button></div>}
+        {error && (
+          <div className="toast-error" role="alert">
+            <CircleAlert size={17} />
+            <span>{error}</span>
+            <button onClick={() => setError("")} aria-label="Dismiss error"><X size={15} /></button>
+          </div>
+        )}
 
         {busy ? (
-          <div className="loading-state"><LoaderCircle className="spin" size={28} /><span>Loading your game hub…</span></div>
+          <div className="loading-state"><span className="loading-ring" />Loading your library…</div>
         ) : selected ? (
           <section className="detail-page">
-            <button className="back-link" onClick={goBack}><ArrowLeft size={17} /> BACK TO DISCOVER</button>
+            <button className="back-link" onClick={() => setSelected(null)}>
+              <ArrowLeft size={16} /> BACK TO STORE
+            </button>
             <div className="detail-layout">
-              <div className="detail-art"><Cover src={selected.coverUrl} title={selected.title} /></div>
+              <div className="detail-art"><Cover game={selected} /></div>
               <div className="detail-info">
-                <div className="eyebrow"><span className="live-pip" /> FEATURED FROM ITCH.IO</div>
-                <h1>{selected.title}</h1>
-                <p className="creator-line">A game by <strong>{selected.creator}</strong></p>
-                <div className="meta-row"><span>{selected.genre || "Visual Novel"}</span><span>{selected.published || "itch.io"}</span><span>REN’PY</span>{selected.browserPlayable && <span>BROWSER PLAY</span>}</div>
-                <p className="detail-description">{selected.description || "A story-driven game made with Ren'Py. Visit its itch.io page for full details, screenshots, and creator information."}</p>
-                <div className="detail-actions">
-                  <button className="button-primary" disabled={filesLoading && !selectedInstalled} onClick={() => {
-                    setActionError("");
-                    if (selectedInstalled) {
-                      void report(invoke("launch_game", { gameId: selected.id }));
-                    } else if (installableFiles.length > 0 || selected.downloadUrl) {
-                      setModalGame(selected);
-                    } else {
-                      void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)));
-                    }
-                  }}>
-                    {selectedInstalled ? <Play size={18} fill="currentColor" /> : <Download size={18} />} {filesLoading && !selectedInstalled ? "CHECKING DOWNLOADS..." : selectedInstalled ? "PLAY" : (installableFiles.length > 0 || selected.downloadUrl) ? "DOWNLOAD GAME" : selected.browserOnly ? "PLAY IN BROWSER" : "OPEN ON ITCH.IO"}
-                  </button>
-                  <button className="button-secondary" onClick={() => void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)))}>{selected.browserPlayable ? "PLAY IN BROWSER" : "VIEW ON ITCH.IO"} <ArrowUpRight size={16} /></button>
+                <div className="eyebrow"><span className="live-pip" /> GAME DETAILS</div>
+                <h1>{selected.name}</h1>
+                <p className="detail-description">
+                  Discover {selected.name}, manage its downloads, and keep it ready to play in your local library.
+                </p>
+                <div className="meta-row">
+                  <span>{Object.keys(selected.downloadLinks).join(" · ") || "No download configured"}</span>
+                  {selected.mods.length > 0 && (
+                    <span>{selected.mods.length} MOD{selected.mods.length === 1 ? "" : "S"}</span>
+                  )}
+                  {installedIds.has(selected.id) && <span className="installed-badge"><Check size={12} /> IN LIBRARY</span>}
                 </div>
-                {selected.files.length > 0 && <div className="available-files">
-                  <span className="field-label">AVAILABLE DOWNLOADS</span>
-                  {selected.files.map((file, index) => <div className="available-file" key={file.uploadId ?? `${file.fileName}-${index}`}>
-                    <span>{file.fileName}</span><strong>{[file.installable ? "REDLINE DOWNLOAD" : file.uploadId === null ? "ACCESS FLOW REQUIRED" : "NOT INSTALLABLE HERE", file.size, file.platforms.join(", ")].filter(Boolean).join(" · ") || "Platform not specified"}</strong>
-                  </div>)}
-                </div>}
-                {!filesLoading && selected.files.length > 0 && installableFiles.length === 0 && <p className="hint-text">itch.io lists these files, but none is publicly available to Redline as an installable archive for this computer. Open itch.io to complete any required access or choose another version.</p>}
-                {!filesLoading && selected.files.length === 0 && !selected.downloadUrl && <p className="hint-text">{selected.browserOnly ? "This entry is browser-only and has no desktop archive. Open itch.io to play it in your browser." : "The public game page did not expose a downloadable file. Open itch.io to check for browser play, restricted downloads, or creator updates."}</p>}
-                {selectedInstalled && <div className="installed-note"><Check size={16} /> In your library</div>}
+                <div className="detail-actions">
+                  {installedIds.has(selected.id) ? (
+                    <button
+                      className="button-primary"
+                      onClick={() => void runAction(() => window.library.launchGame(selected.id))}
+                    >
+                      <Play size={16} fill="currentColor" /> PLAY GAME
+                    </button>
+                  ) : (
+                    <button
+                      className="button-primary"
+                      onClick={() => setDownloadDialog(true)}
+                      disabled={!bestDownloadLink(selected)}
+                    >
+                      <DownloadIcon size={16} /> DOWNLOAD GAME
+                    </button>
+                  )}
+                  <span className="detail-caption">Your games stay on this device.</span>
+                </div>
+                <div className="detail-source">
+                  <span>DOWNLOAD SOURCE</span>
+                  <strong>{Object.keys(selected.downloadLinks).join(", ") || "Not configured"}</strong>
+                </div>
               </div>
             </div>
-            <div className="detail-source"><span>LISTING SOURCE</span><button onClick={() => void openUrl(selected.gameUrl).catch((e: unknown) => setActionError(String(e)))}>{selected.gameUrl} <ArrowUpRight size={14} /></button></div>
           </section>
         ) : page === "home" ? (
           <div className="content-page">
-            {topGame && !query && (
+            {featuredGame && !search && (
               <section className="hero">
-                <Cover src={topGame.coverUrl} title={topGame.title} className="hero-image" />
+                <Cover game={featuredGame} className="hero-image" />
                 <div className="hero-shade" />
                 <div className="hero-content">
-                  <div className="eyebrow"><span className="live-pip" /> TRENDING ON ITCH.IO <span className="hero-separator">/</span> MADE WITH REN’PY</div>
-                  <h1>{topGame.title}</h1>
-                  <p>Discover indie stories, unforgettable characters, and worlds worth getting lost in.</p>
+                  <div className="eyebrow"><span className="live-pip" /> FEATURED GAME</div>
+                  <h1>{featuredGame.name}</h1>
+                  <p>
+                    A new adventure is waiting. Explore your collection, get it installed, and pick up where you left off.
+                  </p>
                   <div className="hero-actions">
-                    <button className="button-primary" onClick={() => openGame(topGame)}><Play size={17} fill="currentColor" /> EXPLORE GAME</button>
-                    <button onClick={() => void openUrl(topGame.gameUrl).catch((e: unknown) => setActionError(String(e)))} className="hero-link">OPEN ON ITCH.IO <ArrowUpRight size={15} /></button>
+                    <button
+                      className="button-primary"
+                      onClick={() => featuredInstalled
+                        ? void runAction(() => window.library.launchGame(featuredGame.id))
+                        : setSelected(featuredGame)}
+                    >
+                      {featuredInstalled
+                        ? <><Play size={16} fill="currentColor" /> PLAY NOW</>
+                        : <>VIEW GAME <ChevronRight size={16} /></>}
+                    </button>
+                    <button className="hero-link" onClick={() => navigate("library")}>
+                      MY LIBRARY <ChevronRight size={15} />
+                    </button>
                   </div>
                 </div>
+                <div className="hero-caption">REDLINE <span>•</span> YOUR GAME COLLECTION</div>
                 <div className="hero-index"><b>01</b><span>/</span>{String(games.length).padStart(2, "0")}</div>
-                <div className="hero-caption">POPULAR PICKS <span>•</span> UPDATED FROM ITCH.IO</div>
               </section>
             )}
-            <section className="game-section">
+            <section className="game-section" id="store-section">
               <div className="section-heading">
-                <div><div className="eyebrow muted">THE ITCH.IO COLLECTION</div><h2>{query ? "Search results" : "Pick your next story"} <span className="section-count">{filteredGames.length}</span></h2></div>
-                <div className="section-tools"><span className="sort-dot" /> POPULAR ON ITCH.IO</div>
+                <div>
+                  <div className="eyebrow muted">{search ? "FIND YOUR NEXT GAME" : "PICK UP SOMETHING NEW"}</div>
+                  <h2>{search ? "Search results" : "Your games"} <span className="section-count">{filteredGames.length}</span></h2>
+                </div>
+                <button className="section-link" onClick={() => setSearch("")}>
+                  {library.length} IN LIBRARY <ChevronRight size={15} />
+                </button>
               </div>
               {filteredGames.length ? (
                 <div className="game-grid">
-                  {filteredGames.map((game, i) => (
-                    <button className="game-card" key={game.id} onClick={() => openGame(game)}>
+                  {filteredGames.map((game, index) => (
+                    <button className="game-card" key={game.id} onClick={() => setSelected(game)}>
                       <div className="card-cover-wrap">
-                        <Cover src={game.coverUrl} title={game.title} className="card-cover" />
-                        <span className="rank-tag">{String(i + 1).padStart(2, "0")}</span>
-                        {installedGameIds.has(game.id) && <span className="owned-tag"><Check size={12} /> IN LIBRARY</span>}
-                        <span className="card-open"><ChevronRight size={19} /></span>
+                        <Cover game={game} className="card-cover" />
+                        {installedIds.has(game.id) ? (
+                          <span className="owned-tag"><Check size={11} /> IN LIBRARY</span>
+                        ) : (
+                          <span className="card-index">{String(index + 1).padStart(2, "0")}</span>
+                        )}
+                        <span className="card-open"><ChevronRight size={17} /></span>
                       </div>
-                      <div className="card-meta"><div className="card-title">{game.title}</div><div className="card-creator">{game.creator} <span>•</span> {game.genre || "Visual Novel"}</div></div>
+                      <div className="card-meta">
+                        <div className="card-title">{game.name}</div>
+                        <div className="card-creator">
+                          {Object.keys(game.downloadLinks).join(" · ") || "No download link"}
+                        </div>
+                      </div>
                     </button>
                   ))}
                 </div>
-              ) : <div className="empty-state"><Search size={25} /><strong>No games found</strong><span>Try another title or creator name.</span></div>}
+              ) : (
+                <div className="empty-state"><Search size={25} /><strong>No games found</strong><span>Try another title.</span></div>
+              )}
             </section>
-            <footer className="page-foot">GAME LIST ORDERED BY ITCH.IO POPULARITY <span>•</span> COVERS AND DOWNLOADS SERVED BY CREATORS’ ITCH.IO PAGES</footer>
+            <footer className="page-foot">YOUR COLLECTION <span>•</span> STORED LOCALLY ON THIS DEVICE</footer>
           </div>
-        ) : page === "library" ? (
+        ) : page === "downloads" ? (
           <section className="list-page">
-            <div className="page-title-row"><div><div className="eyebrow muted">YOUR COLLECTION</div><h1>My Library <span className="section-count">{library.length}</span></h1><p>Games installed on this device. Select one to launch it.</p></div><div className="page-title-icon"><Library size={24} /></div></div>
-            {library.length ? (
-              <div className="library-grid">{library.map((game) => (
-                <article className="library-card" key={game.gameId}>
-                  <Cover src={game.coverUrl} title={game.title} className="library-cover" />
-                  <div className="library-card-body"><div><h3>{game.title}</h3><span>{game.creator}</span></div><div className="library-actions">
-                    {game.running ? <button className="button-stop" onClick={() => void report(invoke("stop_game", { gameId: game.gameId }))}><StopCircle size={16} /> STOP</button> : <button className="button-play" onClick={() => void report(invoke("launch_game", { gameId: game.gameId }))}><Play size={15} fill="currentColor" /> PLAY</button>}
-                    <span className={game.running ? "run-state running" : "run-state"}><i /> {game.running ? "RUNNING" : "READY"}</span>
-                  </div><div className="install-path" title={game.installDir}><HardDriveDownload size={13} /> {game.installDir}</div></div>
+            <div className="page-title-row">
+              <div>
+                <div className="eyebrow muted">YOUR DOWNLOAD QUEUE</div>
+                <h1>Downloads <span className="section-count">{downloads.length}</span></h1>
+                <p>Track installs and manage active downloads.</p>
+              </div>
+              <div className="page-title-icon"><DownloadIcon size={22} /></div>
+            </div>
+            {downloads.length ? (
+              <div className="download-list">{downloads.map((download) => (
+                <article className="download-card" key={download.gameId}>
+                  <img src={download.thumbnail} alt="" />
+                  <div className="download-info">
+                    <div className="download-info-heading">
+                      <h3>{download.gameName}</h3>
+                      <span className={`status-tag status-${download.status}`}>{download.status}</span>
+                    </div>
+                    <span>
+                      {download.error || `${formatBytes(download.bytesDownloaded)}${download.totalBytes ? ` / ${formatBytes(download.totalBytes)}` : ""}`}
+                    </span>
+                    <div className="progress-track">
+                      <i style={{
+                        width: download.totalBytes
+                          ? `${Math.min(100, download.bytesDownloaded / download.totalBytes * 100)}%`
+                          : download.status === "downloading" ? "40%" : "0%",
+                      }} />
+                    </div>
+                  </div>
+                  <div className="download-actions">
+                    {download.status === "downloading" ? (
+                      <button className="icon-button" onClick={() => void runAction(() => window.library.pauseDownload(download.gameId))} aria-label={`Pause ${download.gameName}`}><Pause size={16} /></button>
+                    ) : download.status === "paused" || download.status === "failed" ? (
+                      <button className="icon-button" onClick={() => void runAction(() => window.library.resumeDownload(download.gameId))} aria-label={`Resume ${download.gameName}`}><Play size={16} /></button>
+                    ) : null}
+                    {(download.status === "downloading" || download.status === "paused") && (
+                      <button className="icon-button danger" onClick={() => void runAction(() => window.library.cancelDownload(download.gameId))} aria-label={`Cancel ${download.gameName}`}><X size={16} /></button>
+                    )}
+                    {download.status === "installed" && <Check size={16} />}
+                  </div>
                 </article>
               ))}</div>
-            ) : <div className="empty-state large"><Gamepad2 size={32} /><strong>Your library is waiting</strong><span>Browse the collection and install a game to get started.</span><button className="button-primary" onClick={() => setPage("home")}>EXPLORE GAMES <ChevronRight size={16} /></button></div>}
+            ) : (
+              <div className="empty-state large"><DownloadIcon size={30} /><strong>No downloads yet</strong><span>Choose a game from Home to start an install.</span></div>
+            )}
           </section>
         ) : (
           <section className="list-page">
-            <div className="page-title-row"><div><div className="eyebrow muted">TRANSFER CENTER</div><h1>Downloads <span className="section-count">{downloads.length}</span></h1><p>Manage installs in progress and retry failed downloads.</p></div><div className="page-title-icon"><ArrowDownToLine size={24} /></div></div>
-            {downloads.length ? (
-              <div className="download-list">{downloads.map((item) => {
-                const pct = item.totalBytes && item.totalBytes > 0 ? Math.min(100, Math.round(item.bytesDownloaded / item.totalBytes * 100)) : null;
-                const game = games.find((entry) => entry.id === item.gameId);
-                return <article className="download-card" key={item.gameId}>
-                  <Cover src={item.coverUrl} title={item.title} className="download-cover" />
-                  <div className="download-main"><div className="download-heading"><div><h3>{item.title}</h3><span className={`download-status status-${item.status}`}>{item.status === "downloading" ? "DOWNLOADING" : item.status.toUpperCase()}</span></div><span className="download-size">{prettySize(item.bytesDownloaded)}{item.totalBytes ? ` / ${prettySize(item.totalBytes)}` : ""}</span></div>
-                    <div className="progress-track"><div className={`progress-fill ${item.status}`} style={{ width: `${pct ?? (item.status === "downloading" ? 18 : 100)}%` }} /></div>
-                    <div className="download-foot"><span>{item.error || (pct !== null ? `${pct}% complete` : item.status === "downloading" ? "Receiving data…" : item.status === "installed" ? "Installed successfully" : item.installDir)}</span><div className="download-controls">
-                      {item.status === "downloading" && <button title="Pause download" onClick={() => void report(invoke("pause_download", { gameId: item.gameId }))}><Pause size={16} /></button>}
-                      {item.status === "paused" && <button title="Resume download" onClick={() => void report(invoke("resume_download", { gameId: item.gameId }))}><CirclePlay size={17} /></button>}
-                      {item.status === "failed" && <button title="Retry download" onClick={() => { if (game) { setFolder(item.installDir.replace(/[\\/][^\\/]+$/, "")); setSelectedFileName(game.files.find((file) => file.installable)?.fileName ?? null); setModalGame(game); } }}><CirclePlay size={17} /></button>}
-                      {item.status === "failed" && game?.downloadUrl && <button title="Open host download page" aria-label="Open host download page" onClick={() => void openUrl(game.downloadUrl!).catch((e: unknown) => setActionError(String(e)))}><ArrowUpRight size={16} /></button>}
-                      {item.status !== "installed" && <button title="Cancel download" onClick={() => void report(invoke("cancel_download", { gameId: item.gameId }))}><X size={16} /></button>}
-                      {item.status === "installed" && <span className="completed-mark"><Check size={16} /> READY</span>}
-                    </div></div>
+            <div className="page-title-row">
+              <div>
+                <div className="eyebrow muted">INSTALLED ON THIS DEVICE</div>
+                <h1>My Library <span className="section-count">{library.length}</span></h1>
+                <p>All your installed games, ready when you are.</p>
+              </div>
+              <div className="page-title-icon"><Library size={22} /></div>
+            </div>
+            {library.length ? (
+              <div className="library-grid">{library.map((game) => (
+                <article className="library-card" key={game.id}>
+                  <Cover game={game} className="library-cover" />
+                  <div className="library-card-body">
+                    <h3>{game.name}</h3>
+                    <div className="library-actions">
+                      {game.running ? (
+                        <button className="button-stop" onClick={() => void runAction(() => window.library.stopGame(game.id))}><Square size={14} /> STOP</button>
+                      ) : (
+                        <button className="button-play" onClick={() => void runAction(() => window.library.launchGame(game.id))}><Play size={14} fill="currentColor" /> PLAY</button>
+                      )}
+                      <span className={game.running ? "run-state running" : "run-state"}><i /> {game.running ? "RUNNING" : "READY"}</span>
+                    </div>
+                    <div className="install-path" title={game.installDir}><HardDriveDownload size={13} /> {game.installDir}</div>
                   </div>
-                </article>;
-              })}</div>
-            ) : <div className="empty-state large"><ArrowDownToLine size={30} /><strong>No downloads yet</strong><span>Choose a game from Discover and start an install.</span><button className="button-primary" onClick={() => setPage("home")}>BROWSE GAMES <ChevronRight size={16} /></button></div>}
+                </article>
+              ))}</div>
+            ) : (
+              <div className="empty-state large"><Gamepad2 size={32} /><strong>Your library is waiting</strong><span>Download a game and it will appear here.</span></div>
+            )}
           </section>
         )}
       </main>
 
-      {modalGame && (
-        <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModalGame(null); }}>
+      {downloadDialog && selected && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setDownloadDialog(false);
+        }}>
           <section className="download-modal" role="dialog" aria-modal="true" aria-labelledby="download-title">
-            <button className="modal-close" onClick={() => setModalGame(null)} aria-label="Close"><X size={18} /></button>
-            <div className="modal-icon"><Download size={21} /></div>
-            <div className="eyebrow muted">NEW INSTALL</div>
-            <h2 id="download-title">Download {modalGame.title}</h2>
-            <p className="modal-copy">Choose an available game file and where Redline should install it. The download runs in the background and can be managed from Downloads.</p>
-            {modalInstallableFiles.length > 0 && <><label className="field-label" htmlFor="download-file">GAME FILE</label><select id="download-file" className="file-picker" value={selectedFileName ?? ""} onChange={(event) => setSelectedFileName(event.target.value)}>
-              {modalInstallableFiles.map((file) => <option key={file.fileName} value={file.fileName}>{file.fileName} — {[file.size, file.platforms.join(", ")].filter(Boolean).join(" · ") || "platform not specified"}</option>)}
-            </select></>}
-            <label className="field-label">INSTALL LOCATION</label>
-            <div className="folder-picker"><span title={folder}>{folder || "Choose a folder on this device"}</span><button onClick={() => void chooseFolder()}><Plus size={15} /> BROWSE</button></div>
-            <label className="check-row">
+            <button className="modal-close" onClick={() => setDownloadDialog(false)} aria-label="Close dialog"><X size={18} /></button>
+            <div className="eyebrow"><span className="live-pip" /> INSTALL GAME</div>
+            <h2 id="download-title">Download {selected.name}</h2>
+            <p>Choose where to install the game. Your archive and installed files will stay in this folder.</p>
+            <span className="field-label">DESTINATION FOLDER</span>
+            <div className="folder-picker">
+              <span title={destination}>{destination || "No folder selected"}</span>
+              <button className="button-secondary" onClick={() => void chooseDestination()}>BROWSE</button>
+            </div>
+            {selected.mods.length > 0 && (
+              <fieldset className="mod-picker">
+                <legend>OPTIONAL MODS</legend>
+                <p>Select any mods to download and apply during installation.</p>
+                <div className="mod-options">
+                  {selected.mods.map((mod, index) => {
+                    const modUrl = bestDownloadLink({
+                      ...selected,
+                      downloadLinks: mod.download_links,
+                    });
+                    return (
+                      <label className="mod-option" key={`${mod.name}-${index}`}>
+                        <input
+                          type="checkbox"
+                          checked={selectedModIds.includes(index)}
+                          disabled={!modUrl || starting}
+                          onChange={(event) => {
+                            setSelectedModIds((current) => event.target.checked
+                              ? [...current, index]
+                              : current.filter((id) => id !== index));
+                          }}
+                        />
+                        <span className="mod-option-copy">
+                          <strong>{mod.name}</strong>
+                          <small>{modUrl ? Object.keys(mod.download_links).join(" · ") : "No download link configured"}</small>
+                        </span>
+                        <span className="mod-option-state">{modUrl ? "OPTIONAL" : "UNAVAILABLE"}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
+            )}
+            <label className="checkbox-row">
               <input type="checkbox" checked={runAfter} onChange={(event) => setRunAfter(event.target.checked)} />
-              <span className="custom-check"><Check size={13} /></span>
-              <span><strong>Launch when installation finishes</strong><small>Start the game automatically after it is installed.</small></span>
+              <span>Auto-run after download</span>
             </label>
-            <div className="modal-actions"><button className="button-secondary" onClick={() => setModalGame(null)}>CANCEL</button><button className="button-primary" disabled={!folder || starting || (modalInstallableFiles.length > 0 && !modalGame.files.some((file) => file.fileName === selectedFileName && file.installable))} onClick={() => void beginDownload()}>{starting ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />} START DOWNLOAD</button></div>
-            <div className="modal-safety"><ShieldCheck size={14} /> itch.io authorizes each file request; paid or restricted downloads are not bypassed.</div>
+            <button className="button-primary modal-submit" disabled={!destination || starting} onClick={() => void beginDownload()}>
+              {starting ? "STARTING…" : <><DownloadIcon size={16} /> START DOWNLOAD</>}
+            </button>
           </section>
         </div>
       )}
     </div>
   );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(1)} ${units[index]}`;
 }
 
 export default App;

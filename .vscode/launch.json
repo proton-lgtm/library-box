@@ -2,10 +2,10 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run Redline Library (Tauri)",
+      "name": "Run (Electron)",
       "type": "node-terminal",
       "request": "launch",
-      "command": "npm run tauri -- dev"
+      "command": "npm run dev"
     }
   ]
 }

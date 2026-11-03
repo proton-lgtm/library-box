@@ -1,56 +1,61 @@
 # Redline Library
 
-Redline is a Tauri 2 desktop library for discovering Ren'Py games, tracking verified public archive downloads, installing ZIP builds, and launching/stopping installed games. The catalog and transfer/install state are stored in a local SQLite database under the operating system's app-data directory.
+Redline Library is a cross-platform desktop game library built with Electron, React, TypeScript, and Vite. Its local SQLite catalog is seeded from [`py_box/games.json`](./py_box/games.json); the Python CLI in `py_box/` remains available independently.
 
-## Run locally
+The interface follows the supplied game-store references: deep navy surfaces, violet accents, subtle halftone texture, rounded artwork panels, and a compact collection sidebar. It uses the Inter variable font bundled locally with the app, so typography is consistent offline and across platforms.
 
-Install Node.js 20.19+ (or 22.12+) and Rust stable with the platform's native build prerequisites. Then, from the project folder:
+## Recommended stack
+
+| Area | Choice | Why it fits | Main tradeoff |
+|---|---|---|---|
+| Desktop shell | Electron + electron-builder | Mature Windows, macOS, and Linux support; familiar web stack | Larger application packages than native-webview shells |
+| UI | React + TypeScript + Vite | Reuses the existing UI approach, fast development, typed components | Renderer/main process boundaries need deliberate IPC design |
+| Local database | SQLite via better-sqlite3 | Lightweight, transactional, local-first storage | Native addon must be rebuilt and validated for each OS/architecture |
+| Downloads | Node HTTPS streaming + Electron browser flow for GoFile/Workupload | Direct downloads support progress and range-based resume; browser flow handles interactive host pages without a host API | Resume depends on server support; browser-host pages may require user interaction |
+| Archive extraction | Bundled 7-Zip via `7zip-bin` | One extractor supports ZIP, 7z, and RAR across platforms | Binary packaging/licensing and archive safety need attention; RAR support depends on the bundled 7-Zip build |
+| Tests | Vitest + Testing Library | Covers renderer and desktop service logic in the existing test workflow | Native addon and platform-specific process behavior still need OS-specific validation |
+
+## Development
+
+Install Node.js 20.19+ (or 22.12+) and the platform's native build prerequisites for `better-sqlite3`, then run:
 
 ```powershell
 npm install
-npm run tauri dev
+npm run dev
 ```
 
-To run the frontend tests and production web build:
+The Electron main process owns filesystem access, downloads, archive extraction, SQLite, and game launching. Renderer code has no Node integration. A narrow, typed preload API bridges the renderer to validated IPC handlers.
+
+## Tests and builds
 
 ```powershell
+npm run typecheck
 npm test
 npm run build
 ```
 
-To run the Rust/SQLite and archive tests and produce the native package for the current host:
+Create a packaged application for the current host:
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml
-npm run tauri build
+npm run package:dir
 ```
 
-For a Windows NSIS installer specifically:
+Platform package scripts are also available:
 
 ```powershell
-npm run tauri build -- --bundles nsis
+npm run package:win
+npm run package:mac
+npm run package:linux
 ```
 
-Tauri desktop build prerequisites:
-
-- **Windows:** Microsoft C++ Build Tools (MSVC), WebView2 runtime, and the Rust MSVC target.
-- **macOS:** Xcode Command Line Tools and the Rust target for the build architecture.
-- **Linux:** the Tauri v2 GTK/WebKitGTK development packages for the distribution, plus the Rust target.
-
-Tauri builds native installers for the host OS; producing Windows, macOS, and Linux packages requires building on each respective platform.
+Build native packages on their target operating system for the most reliable results. macOS signing/notarization requires macOS and Apple developer tooling; this project does not configure signing credentials. Linux package formats may require distribution-specific build dependencies. Windows, macOS, and Linux packages have not all been validated from one machine.
 
 ## Using the library
 
-The home page shows a snapshot of the first ten items in itch.io's **Popular** sort for its Ren'Py collection. Open a title's itch.io page in the system browser from its details; Redline checks the official game page for file names, advertised sizes, platform labels, and upload IDs and caches that metadata in SQLite. The Download action asks for an install folder and whether to launch after install, then follows itch.io's public direct-download sequence: fetch CSRF/cookies, request `/download_url`, inspect the resulting download page for the selected upload, request its short-lived signed archive URL, and stream it. This flow is based on the approach documented by [Wal33D/itchio-downloader](https://github.com/Wal33D/itchio-downloader); Redline implements it in its Rust/Tauri backend rather than embedding that Node package. Downloads supports pause, resume, cancel, progress, and retry; retries negotiate a fresh signed URL. ZIP extraction rejects traversal paths and symbolic links and only marks an install ready when it finds a launcher for the current OS. The Library page can launch and stop installed games.
+Home shows the games imported from `py_box/games.json`. Selecting a cover opens its details and the download flow. Choose an existing destination folder, optionally select catalog mods, and optionally enable auto-run after installation. Selected mods download after the base game, then their configured extract/move steps are applied to the staged install before it is added to the library. Downloads are available from the left navigation and support pause, resume, and cancel. GoFile and Workupload links open in a dedicated browser window so the user can complete any host-page interaction. Other configured HTTPS links are downloaded directly. The Library page lists installed games and lets the user launch or stop them.
 
-Upload IDs are not treated as direct URLs. itch.io is asked to authorize each selected upload in the same way its public Download button does; files requiring an account, purchase, or other browser interaction are not bypassed and should be opened on itch.io instead. ZIP files labeled for the current OS are offered for installation even when the upload ID only appears on itch.io's follow-up download page; Redline discovers that ID during the official authorization flow. Catalog `download_url` accepts a legacy URL string or a platform map (`pc`/`windows`, `mac`/`macos`, or `linux`), and Redline selects the current build's entry. Public Pixeldrain `/u/` and `/d/` links are normalized to Pixeldrain's file API. Direct HTTPS file URLs on Pixeldrain, GoFile, Datanodes, Uploadhaven, VikingFile, and MixDrop are accepted. Hoster share pages (including MixDrop `/f/` pages and GoFile `/d/` pages) are not direct links; if they return HTML or JSON, Redline reports that a direct link is required. It does not automate ads, countdowns, captchas, sign-in, or paid-download gates.
+ZIP, 7z, and RAR archives are extracted with the bundled 7-Zip executable. Archive paths and links are checked before extraction, and installation is promoted from a staging directory only after a compatible launcher is found. Launcher processes are started without a shell.
 
-The UI uses the installed system fonts Segoe UI for general interface text and Bahnschrift for headings; there are no external font downloads.
+## Security notes
 
-## Catalog provenance
-
-Seed order follows the itch.io `made-with-renpy` **Popular** listing captured on September 30, 2026. This is a snapshot of the site's displayed sort order, not a claimed ranking by sales, downloads, or rating. Cover images are hotlinked from the public itch.io image CDN at the 315×250 listing-thumbnail size; game pages remain the source of truth for availability, platform support, pricing, and creator information. Catalog source data is in `src-tauri/src/catalog.json`.
-
-## Security and platform behavior
-
-The app requests only native folder selection and external URL opening from Tauri plugins. Game launch uses a selected install's recorded executable directly (not a shell command); extracted links and paths are validated. Stop terminates the launched process and, on Unix, its dedicated process group; on Windows it terminates the launched process. Download requests are restricted to HTTPS itch.io/itch.zone and supported file-host domains, redirects are validated at every hop, and the SQLite database remains local to the user profile.
+Electron windows use context isolation, sandboxing, and disabled Node integration. The preload exposes only the library operations needed by the UI. IPC validates payloads, download URLs are checked against the selected game's catalog links, network URLs and redirects must use HTTPS and cannot target localhost, and the download destination must be an existing folder. SQLite data is stored in Electron's per-user application data directory.

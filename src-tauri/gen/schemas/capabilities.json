@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Local library window with native folder selection","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open",{"identifier":"opener:allow-open-url","allow":[{"url":"https://itch.io/*"},{"url":"https://*.itch.io/*"}]}]}}
