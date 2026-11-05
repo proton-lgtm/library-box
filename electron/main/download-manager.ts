@@ -342,13 +342,16 @@ export class DownloadManager {
   }
 
   cancel(gameId: number): void {
-    const transfer = this.requireTransfer(gameId);
-    transfer.controller?.abort();
-    transfer.item?.cancel();
-    transfer.browser?.close();
-    this.transfers.delete(gameId);
     const record = this.database.getDownload(gameId);
-    if (record) void rm(`${record.archivePath}.part`, { force: true });
+    if (!record || !["downloading", "paused", "failed"].includes(record.status)) {
+      throw new Error("Download cannot be cancelled in its current state.");
+    }
+    const transfer = this.transfers.get(gameId);
+    transfer?.controller?.abort();
+    transfer?.item?.cancel();
+    transfer?.browser?.close();
+    this.transfers.delete(gameId);
+    void rm(`${record.archivePath}.part`, { force: true });
     this.database.updateDownload(gameId, { status: "cancelled", error: null });
     this.emit(gameId);
   }

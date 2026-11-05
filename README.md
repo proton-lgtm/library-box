@@ -34,6 +34,14 @@ npm test
 npm run build
 ```
 
+To reset the app's local Electron storage (SQLite catalog/download records, encrypted auth session, and Chromium cache/storage) without removing installed game folders:
+
+```powershell
+npm run clear:electron-storage
+```
+
+Close the app first, then type `CLEAR` when prompted. Use `npm run clear:electron-storage -- --dry-run` to inspect the target, or append `-- --yes` to skip confirmation.
+
 Create a packaged application for the current host:
 
 ```powershell
@@ -58,7 +66,7 @@ Home shows the games fetched from Supabase; the last cached catalog remains avai
 
 Run [`supabase/migrations/20261105000000_catalog.sql`](./supabase/migrations/20261105000000_catalog.sql) in the Supabase SQL editor, then manually populate `games` and its matching `game_details` row. Link objects use JSON objects; `mod_links` is an array of the existing mod objects, including `steps_to_apply`.
 
-In Supabase Auth, enable new users and anonymous sign-ins, keep email confirmation disabled to avoid requiring email verification, and enable manual identity linking so an anonymous user can be upgraded without changing their user ID. The desktop app uses only the publishable key and read-only catalog access; never put a service-role key in the app or `.env.local`.
+In Supabase Auth, enable new users and anonymous sign-ins, keep email confirmation disabled to avoid requiring email verification, and enable manual identity linking so an anonymous user can be upgraded without changing their user ID. Catalog reads are permitted only to the `authenticated` role; anonymous Auth users receive a JWT with that role. Run any newer SQL migrations in order, including `20261105143500_authenticated_catalog_access.sql` if the original catalog migration was already applied. The desktop app uses only the publishable key and read-only catalog access; never put a service-role key in the app or `.env.local`.
 
 ZIP, 7z, and RAR archives are extracted with the bundled 7-Zip executable. Archive paths and links are checked before extraction. Launcher processes are started without a shell.
 

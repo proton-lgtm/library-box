@@ -161,6 +161,16 @@ export class LibraryDatabase {
       ORDER BY CASE WHEN supabase_id=@id THEN 0 ELSE 1 END
       LIMIT 1
     `);
+    const findNameConflict = this.db.prepare(`
+      SELECT id FROM games
+      WHERE name=@name AND (@localId IS NULL OR id<>@localId)
+      LIMIT 1
+    `);
+    const nameExists = this.db.prepare("SELECT 1 FROM games WHERE name=?");
+    const archiveLocalConflict = this.db.prepare(`
+      UPDATE games SET name=@archivedName, catalog_available=0
+      WHERE id=@conflictId
+    `);
     const insert = this.db.prepare(`
       INSERT INTO games (
         supabase_id, name, thumbnail, size_bytes, last_updated, tags,
@@ -186,6 +196,20 @@ export class LibraryDatabase {
       markUnavailable.run();
       for (const game of games) {
         const existing = findExisting.get({ id: game.id, name: game.name }) as { id: number } | undefined;
+        const conflict = findNameConflict.get({
+          name: game.name,
+          localId: existing?.id ?? null,
+        }) as { id: number } | undefined;
+        if (conflict) {
+          const baseName = `${game.name} (local record ${conflict.id})`;
+          let archivedName = baseName;
+          let suffix = 2;
+          while (nameExists.get(archivedName)) {
+            archivedName = `${baseName} ${suffix}`;
+            suffix += 1;
+          }
+          archiveLocalConflict.run({ archivedName, conflictId: conflict.id });
+        }
         const values = {
           ...game,
           tags: JSON.stringify(game.tags),

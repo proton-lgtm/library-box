@@ -142,6 +142,77 @@ describe("Supabase catalog", () => {
     database.close();
   });
 
+  it("establishes an anonymous JWT before querying the catalog", async () => {
+    const database = new LibraryDatabase(":memory:");
+    mocks.order.mockResolvedValue({ data: [], error: null });
+    const service = makeService(database);
+
+    await service.refreshCatalog();
+
+    expect(mocks.client.auth.signInAnonymously.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.order.mock.invocationCallOrder[0]);
+    expect(await service.refreshCatalog()).toMatchObject({ stale: false });
+    database.close();
+  });
+
+  it("allows authenticated catalog access with an ephemeral anonymous session", async () => {
+    const database = new LibraryDatabase(":memory:");
+    mocks.order.mockResolvedValue({ data: [], error: null });
+    const service = new SupabaseService(
+      database,
+      "https://project.supabase.co",
+      "sb_publishable_test",
+    );
+
+    const snapshot = await service.refreshCatalog();
+
+    expect(snapshot.stale).toBe(false);
+    expect(mocks.client.auth.signInAnonymously).toHaveBeenCalledOnce();
+    database.close();
+  });
+
+  it("does not make the catalog request when anonymous token initialization fails", async () => {
+    const database = new LibraryDatabase(":memory:");
+    mocks.client.auth.signInAnonymously.mockResolvedValue({
+      data: { user: null, session: null },
+      error: { message: "Anonymous sign-in disabled." },
+    });
+    const service = makeService(database);
+
+    const snapshot = await service.refreshCatalog();
+
+    expect(snapshot).toMatchObject({
+      stale: true,
+      error: expect.stringContaining("Anonymous sign-in disabled."),
+    });
+    expect(mocks.client.from).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it("retries anonymous sign-in on catalog refresh after initial auth failure", async () => {
+    const database = new LibraryDatabase(":memory:");
+    mocks.order.mockResolvedValue({ data: [], error: null });
+    mocks.client.auth.signInAnonymously
+      .mockResolvedValueOnce({
+        data: { user: null, session: null },
+        error: { message: "Anonymous sign-in disabled." },
+      })
+      .mockResolvedValueOnce({
+        data: { user: anonymousUser, session: {} },
+        error: null,
+      });
+    const service = makeService(database);
+
+    const failedSnapshot = await service.refreshCatalog();
+    const retriedSnapshot = await service.refreshCatalog();
+
+    expect(failedSnapshot).toMatchObject({ stale: true, error: expect.stringContaining("Anonymous sign-in disabled.") });
+    expect(retriedSnapshot).toMatchObject({ stale: false, error: null });
+    expect(mocks.client.auth.signInAnonymously).toHaveBeenCalledTimes(2);
+    expect(mocks.client.from).toHaveBeenCalledOnce();
+    database.close();
+  });
+
   it("refuses a service-role key and keeps catalog access unavailable", async () => {
     const database = new LibraryDatabase(":memory:");
     const service = new SupabaseService(

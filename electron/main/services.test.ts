@@ -121,6 +121,75 @@ describe("SQLite library", () => {
     database.close();
   });
 
+  it("preserves an old local row when a remote rename collides with its name", () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "New Remote Name");
+    mkdirSync(installDir);
+    const database = makeDatabase();
+    const oldRemoteId = "69e2af3e-4128-4e15-95a0-b90e33ae11cd";
+    database.syncCatalog([{
+      id: oldRemoteId,
+      name: "Old Remote Name",
+      thumbnail: "",
+      sizeBytes: null,
+      lastUpdated: null,
+      tags: [],
+      description: "",
+      releaseDate: null,
+      detailsLastUpdated: null,
+      developerLinks: {},
+      version: null,
+      operatingSystems: [],
+      downloadLinks: {},
+      mods: [],
+    }]);
+    database.seed(JSON.stringify([{
+      name: "New Remote Name",
+      download_links: {},
+      mods: [],
+    }]));
+    const localGame = database.listGames().find((game) => game.name === "New Remote Name");
+    if (!localGame) throw new Error("The legacy local game was not seeded.");
+    database.saveDownload({
+      gameId: localGame.id,
+      url: "https://downloads.example/older-game.zip",
+      status: "installed",
+      archivePath: path.join(installDir, "older-game.zip"),
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+
+    database.syncCatalog([{
+      id: oldRemoteId,
+      name: "New Remote Name",
+      thumbnail: "",
+      sizeBytes: null,
+      lastUpdated: null,
+      tags: [],
+      description: "",
+      releaseDate: null,
+      detailsLastUpdated: null,
+      developerLinks: {},
+      version: null,
+      operatingSystems: [],
+      downloadLinks: {},
+      mods: [],
+    }]);
+
+    expect(database.listGames()).toHaveLength(1);
+    expect(database.listGames()[0]).toMatchObject({
+      name: "New Remote Name",
+      supabaseId: oldRemoteId,
+    });
+    expect(database.listLibrary()).toMatchObject([{
+      name: expect.stringMatching(/^New Remote Name \(local record \d+\)$/),
+      installDir,
+    }]);
+    expect(database.getCatalogLastSyncedAt()).toBeTruthy();
+    database.close();
+  });
+
   it("adds catalog cache columns to an existing local database without dropping installs", () => {
     const root = makeTempDirectory();
     const databasePath = path.join(root, "library.sqlite");
@@ -306,6 +375,31 @@ describe("download controls", () => {
     expect(database.getDownload(1)?.status).toBe("cancelled");
     expect(requests[1]?.aborted).toBe(true);
     await new Promise((resolve) => setImmediate(resolve));
+    database.close();
+  });
+
+  it("allows cancelling a failed download without an active transfer", () => {
+    const database = makeDatabase();
+    const directory = makeTempDirectory();
+    const installDir = path.join(directory, "Sample Game");
+    mkdirSync(installDir);
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "failed",
+      archivePath: path.join(installDir, "game.zip"),
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+      error: "The connection was interrupted.",
+    });
+    const manager = new DownloadManager(database, new Launcher(database));
+
+    expect(() => manager.cancel(1)).not.toThrow();
+    expect(database.getDownload(1)).toMatchObject({
+      status: "cancelled",
+      error: null,
+    });
     database.close();
   });
 

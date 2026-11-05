@@ -1,7 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import type { AuthCredentials, AuthState, CatalogSnapshot } from "../../src/shared/types";
-import type { AuthSessionStorage } from "./secure-session-storage";
+import { createMemorySessionStorage, type AuthSessionStorage } from "./secure-session-storage";
 import { type CatalogEntry, LibraryDatabase } from "./database";
 
 const httpsUrl = z.string().url().refine((value) => {
@@ -86,12 +86,13 @@ export class SupabaseService {
       return;
     }
 
+    const authStorage = sessionStorage ?? createMemorySessionStorage();
     this.client = createClient(url, publishableKey, {
       auth: {
-        autoRefreshToken: Boolean(sessionStorage),
+        autoRefreshToken: true,
         detectSessionInUrl: false,
-        persistSession: Boolean(sessionStorage),
-        ...(sessionStorage ? { storage: sessionStorage } : {}),
+        persistSession: true,
+        storage: authStorage,
       },
     });
     if (!sessionStorage) {
@@ -104,22 +105,32 @@ export class SupabaseService {
   }
 
   initializeAuth(): Promise<AuthState> {
-    this.authInitialization ??= this.initializeAuthOnce();
+    if (!this.authInitialization) {
+      const initialization = this.initializeAuthOnce();
+      const sharedInitialization = initialization.finally(() => {
+        if (this.authInitialization === sharedInitialization) {
+          this.authInitialization = undefined;
+        }
+      });
+      this.authInitialization = sharedInitialization;
+    }
     return this.authInitialization;
   }
 
   private async initializeAuthOnce(): Promise<AuthState> {
-    if (!this.client || !this.sessionStorage) return this.authState;
+    if (!this.client) return this.authState;
     try {
       const { data, error } = await this.client.auth.getSession();
       if (error) throw error;
       if (data.session) {
-        this.authState = stateFromUser(data.session.user);
+        this.authState = stateFromUser(data.session.user, this.sessionStorage ? null :
+          "Secure session storage is unavailable. This anonymous session lasts only until the app closes.");
       } else {
         const { data: anonymous, error: signInError } = await this.client.auth.signInAnonymously();
         if (signInError) throw signInError;
         if (!anonymous.user) throw new Error("Supabase did not return an anonymous user.");
-        this.authState = stateFromUser(anonymous.user);
+        this.authState = stateFromUser(anonymous.user, this.sessionStorage ? null :
+          "Secure session storage is unavailable. This anonymous session lasts only until the app closes.");
       }
     } catch (error) {
       this.authState = {
@@ -136,6 +147,10 @@ export class SupabaseService {
     if (!this.client) return this.staleSnapshot(this.configError ?? "Supabase is unavailable.");
 
     try {
+      const auth = await this.initializeAuth();
+      if (auth.status === "unavailable") {
+        throw new Error(auth.message ?? "A Supabase authentication token is required to load the catalog.");
+      }
       const { data, error } = await this.client
         .from("games")
         .select("id,name,thumbnail_url,size_bytes,last_updated,tags,game_details(description,release_date,last_updated,developer_links,version,operating_systems,download_links,mod_links)")
@@ -155,8 +170,9 @@ export class SupabaseService {
   }
 
   async getAuthState(): Promise<AuthState> {
-    if (!this.client || !this.sessionStorage) return this.authState;
+    if (!this.client) return this.authState;
     if (this.authInitialization) await this.authInitialization;
+    if (!this.sessionStorage) return this.authState;
     try {
       const { data, error } = await this.client.auth.getSession();
       if (error) throw error;
@@ -268,11 +284,14 @@ function toCatalogEntry(game: z.infer<typeof catalogGameSchema>): CatalogEntry {
   };
 }
 
-function stateFromUser(user: { is_anonymous?: boolean; email?: string }): AuthState {
+function stateFromUser(
+  user: { is_anonymous?: boolean; email?: string },
+  message: string | null = null,
+): AuthState {
   return {
     status: user.is_anonymous ? "anonymous" : "account",
     email: user.email ?? null,
-    message: null,
+    message,
   };
 }
 

@@ -9,6 +9,9 @@ import { LibraryManager } from "./library-manager";
 import { createEncryptedSessionStorage, type AuthSessionStorage } from "./secure-session-storage";
 import { SupabaseService } from "./supabase-service";
 
+declare const __SUPABASE_URL__: string;
+declare const __SUPABASE_PUBLISHABLE_KEY__: string;
+
 const currentDirectory = __dirname;
 let mainWindow: BrowserWindow | undefined;
 let database: LibraryDatabase;
@@ -44,6 +47,9 @@ function createWindow(downloads: DownloadManager, launcher: Launcher, supabase: 
   mainWindow.on("maximize", () => mainWindow?.webContents.send("library:window-maximized", true));
   mainWindow.on("unmaximize", () => mainWindow?.webContents.send("library:window-maximized", false));
   void mainWindow.loadURL(rendererUrl);
+  if (process.env.OPEN_DEVTOOLS === "1") {
+    mainWindow.webContents.openDevTools({ mode: "detach" });
+  }
   mainWindow.on("closed", () => { mainWindow = undefined; });
 }
 

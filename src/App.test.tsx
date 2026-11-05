@@ -191,6 +191,24 @@ describe("Electron game library UI", () => {
     expect(container.querySelector(".progress-track")).toBeTruthy();
   });
 
+  it("allows cancelling a failed download", async () => {
+    api.listDownloads = vi.fn().mockResolvedValue([{
+      gameId: 1,
+      gameName: "Sample Game",
+      thumbnail: "",
+      status: "failed",
+      bytesDownloaded: 50,
+      totalBytes: 100,
+      error: "Connection interrupted.",
+      installDir: "C:\\Games\\Sample Game",
+    }]);
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Downloads" }));
+    await user.click(screen.getByRole("button", { name: "Cancel Sample Game" }));
+    await waitFor(() => expect(api.cancelDownload).toHaveBeenCalledWith(1));
+  });
+
   it("launches and stops installed games from the library", async () => {
     installed = [{
       ...game,
@@ -219,10 +237,10 @@ describe("Electron game library UI", () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Library" }));
-    await user.click(await screen.findByRole("button", { name: /^Delete$/ }));
+    await user.click(await screen.findByRole("button", { name: "Delete Sample Game" }));
     const deleteButtons = screen.getAllByRole("button", { name: /^Delete$/ });
     await user.click(deleteButtons[deleteButtons.length - 1]);
     await waitFor(() => expect(api.deleteGame).toHaveBeenCalledWith(1));
-    await waitFor(() => expect(screen.getByText("No installed games")).toBeTruthy());
+    expect(await screen.findByRole("button", { name: "View Sample Game" })).toBeTruthy();
   });
 });
