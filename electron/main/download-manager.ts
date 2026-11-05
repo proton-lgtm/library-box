@@ -13,6 +13,7 @@ interface Transfer {
   controller?: AbortController;
   browser?: BrowserWindow;
   item?: DownloadItem;
+  completion?: Promise<void>;
 }
 
 function safeUrl(raw: string): URL {
@@ -204,16 +205,17 @@ export class DownloadManager {
       installDir,
       runAfter: input.runAfter,
       selectedModIds,
+      phase: null,
     });
     const transfer: Transfer = {};
     this.transfers.set(game.id, transfer);
     this.emit(game.id);
     if (existsSync(archivePath)) {
-      void this.installExistingArchive(game.id, archivePath, transfer);
+      transfer.completion = this.installExistingArchive(game.id, archivePath, transfer);
     } else if (isBrowserHost(url)) {
-      this.startBrowserTransfer(game.id, url, archivePath, transfer);
+      transfer.completion = this.startBrowserTransfer(game.id, url, archivePath, transfer);
     } else {
-      void this.downloadDirect(game.id, resolveDirectUrl(url), archivePath, transfer);
+      transfer.completion = this.downloadDirect(game.id, resolveDirectUrl(url), archivePath, transfer);
     }
   }
 
@@ -225,7 +227,12 @@ export class DownloadManager {
       transfer.item.pause();
     } else if (transfer.controller) {
       transfer.controller.abort();
-      this.database.updateDownload(gameId, { status: "paused", error: null });
+      this.database.updateDownload(gameId, {
+        status: "paused",
+        error: null,
+        phase: null,
+        phaseDetail: null,
+      });
       this.emit(gameId);
     }
   }
@@ -243,9 +250,14 @@ export class DownloadManager {
     }
     transfer.controller = new AbortController();
     const validatedUrl = safeUrl(record.url);
-    this.database.updateDownload(gameId, { status: "downloading", error: null });
+    this.database.updateDownload(gameId, {
+      status: "downloading",
+      error: null,
+      phase: null,
+      phaseDetail: null,
+    });
     this.emit(gameId);
-    void this.resumeTransfer(gameId, validatedUrl, transfer);
+    transfer.completion = this.resumeTransfer(gameId, validatedUrl, transfer);
   }
 
   private async resumeTransfer(gameId: number, url: URL, transfer: Transfer): Promise<void> {
@@ -264,10 +276,10 @@ export class DownloadManager {
         await this.installExistingArchive(gameId, archivePath, transfer);
       } else if (isBrowserHost(url)) {
         transfer.controller = undefined;
-        this.startBrowserTransfer(gameId, url, archivePath, transfer);
+        await this.startBrowserTransfer(gameId, url, archivePath, transfer);
       } else {
         transfer.controller = undefined;
-        void this.downloadDirect(gameId, resolveDirectUrl(url), archivePath, transfer);
+        await this.downloadDirect(gameId, resolveDirectUrl(url), archivePath, transfer);
       }
     } catch (error) {
       this.fail(gameId, error);
@@ -341,19 +353,36 @@ export class DownloadManager {
     return archivePath;
   }
 
-  cancel(gameId: number): void {
+  async cancel(gameId: number): Promise<void> {
     const record = this.database.getDownload(gameId);
     if (!record || !["downloading", "paused", "failed"].includes(record.status)) {
       throw new Error("Download cannot be cancelled in its current state.");
     }
     const transfer = this.transfers.get(gameId);
+    this.database.updateDownload(gameId, {
+      status: "cancelled",
+      error: null,
+      phase: null,
+      phaseDetail: null,
+    });
     transfer?.controller?.abort();
     transfer?.item?.cancel();
     transfer?.browser?.close();
     this.transfers.delete(gameId);
-    void rm(`${record.archivePath}.part`, { force: true });
-    this.database.updateDownload(gameId, { status: "cancelled", error: null });
-    this.emit(gameId);
+    await transfer?.completion;
+    const partialArchives = [`${record.archivePath}.part`];
+    const game = this.database.getGame(gameId);
+    for (const modId of record.selectedModIds) {
+      const mod = game?.mods[modId];
+      const modUrl = mod && preferredModUrl(mod);
+      if (!mod || !modUrl) continue;
+      const url = new URL(modUrl);
+      const extension = path.extname(url.pathname).toLowerCase() ||
+        (isDirectFileMod(mod) ? ".bin" : ".zip");
+      partialArchives.push(path.join(record.installDir, `${safeFileName(mod.name)}${extension}.part`));
+    }
+    await Promise.all(partialArchives.map((partialPath) => rm(partialPath, { force: true })));
+    this.database.removeCancelledDownload(gameId);
   }
 
   private requireTransfer(gameId: number): Transfer {
@@ -371,6 +400,8 @@ export class DownloadManager {
       totalBytes: record.totalBytes,
       status: record.status,
       error: record.error,
+      phase: record.phase ?? null,
+      phaseDetail: record.phaseDetail ?? null,
     };
     for (const listener of this.listeners) listener(update);
   }
@@ -444,6 +475,8 @@ export class DownloadManager {
         bytesDownloaded: start,
         totalBytes,
         error: null,
+        phase: null,
+        phaseDetail: null,
       });
       this.emit(gameId);
       const reader = response.body.getReader();
@@ -485,84 +518,103 @@ export class DownloadManager {
     url: URL,
     archivePath: string,
     transfer: Transfer,
-  ): void {
-    const browser = new BrowserWindow({
-      width: 1000,
-      height: 720,
-      title: "Complete download in browser",
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-      },
-    });
-    transfer.browser = browser;
-    let downloadStarted = false;
-    const handleDownload = (
-      _event: Electron.Event,
-      item: DownloadItem,
-    ): void => {
-      if (downloadStarted) {
-        item.cancel();
-        return;
-      }
-      let downloadUrl: URL;
-      try {
-        downloadUrl = safeUrl(item.getURL());
-      } catch (error) {
-        item.cancel();
-        this.fail(gameId, error);
-        browser.close();
-        return;
-      }
-      downloadStarted = true;
-      transfer.item = item;
-      item.setSavePath(`${archivePath}.part`);
-      item.on("updated", () => {
-        const status = item.isPaused() ? "paused" : "downloading";
-        const received = item.getReceivedBytes();
-        this.database.updateDownload(gameId, {
-          status,
-          bytesDownloaded: received,
-          totalBytes: item.getTotalBytes() || null,
-        });
-        this.emit(gameId);
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      let downloadStarted = false;
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      const browser = new BrowserWindow({
+        width: 1000,
+        height: 720,
+        title: "Complete download in browser",
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+        },
       });
-      item.once("done", (_doneEvent, state) => {
-        browser.close();
-        transfer.item = undefined;
-        transfer.browser = undefined;
-        if (state !== "completed") {
-          this.transfers.delete(gameId);
-          if (state === "cancelled") void rm(`${archivePath}.part`, { force: true });
-          if (state === "cancelled") {
-            this.database.updateDownload(gameId, { status: "cancelled" });
-            this.emit(gameId);
-          } else {
-            this.fail(gameId, new Error(`Browser download ended with status: ${state}.`));
-          }
+      transfer.browser = browser;
+      const handleDownload = (
+        _event: Electron.Event,
+        item: DownloadItem,
+      ): void => {
+        if (downloadStarted) {
+          item.cancel();
           return;
         }
-        void rename(`${archivePath}.part`, archivePath)
-          .then(() => this.finishInstall(gameId, archivePath, transfer))
-          .catch((error: unknown) => this.fail(gameId, error));
-      });
-      if (!downloadUrl) return;
-    };
-    browser.webContents.session.on("will-download", handleDownload);
-    browser.once("closed", () => {
-      if (transfer.browser === browser) transfer.browser = undefined;
-      browser.webContents.session.removeListener("will-download", handleDownload);
-      if (!downloadStarted && this.transfers.has(gameId)) {
-        this.transfers.delete(gameId);
-        this.database.updateDownload(gameId, {
-          status: "cancelled",
-          error: "The download browser was closed before a download started.",
+        try {
+          safeUrl(item.getURL());
+        } catch (error) {
+          item.cancel();
+          this.fail(gameId, error);
+          browser.close();
+          return;
+        }
+        downloadStarted = true;
+        transfer.item = item;
+        item.setSavePath(`${archivePath}.part`);
+        item.on("updated", () => {
+          if (this.database.getDownload(gameId)?.status === "cancelled") return;
+          const status = item.isPaused() ? "paused" : "downloading";
+          const received = item.getReceivedBytes();
+          this.database.updateDownload(gameId, {
+            status,
+            bytesDownloaded: received,
+            totalBytes: item.getTotalBytes() || null,
+            phase: null,
+            phaseDetail: null,
+          });
+          this.emit(gameId);
         });
-        this.emit(gameId);
-      }
+        item.once("done", (_doneEvent, state) => {
+          browser.close();
+          transfer.item = undefined;
+          transfer.browser = undefined;
+          if (this.database.getDownload(gameId)?.status === "cancelled") {
+            finish();
+            return;
+          }
+          if (state !== "completed") {
+            this.transfers.delete(gameId);
+            if (state === "cancelled") void rm(`${archivePath}.part`, { force: true });
+            if (state === "cancelled") {
+              this.database.updateDownload(gameId, { status: "cancelled" });
+              this.emit(gameId);
+            } else {
+              this.fail(gameId, new Error(`Browser download ended with status: ${state}.`));
+            }
+            finish();
+            return;
+          }
+          void rename(`${archivePath}.part`, archivePath)
+            .then(() => this.finishInstall(gameId, archivePath, transfer))
+            .catch((error: unknown) => this.fail(gameId, error))
+            .finally(finish);
+        });
+      };
+      browser.webContents.session.on("will-download", handleDownload);
+      browser.once("closed", () => {
+        if (transfer.browser === browser) transfer.browser = undefined;
+        browser.webContents.session.removeListener("will-download", handleDownload);
+        if (!downloadStarted && this.transfers.has(gameId)) {
+          this.transfers.delete(gameId);
+          this.database.updateDownload(gameId, {
+            status: "cancelled",
+            error: "The download browser was closed before a download started.",
+          });
+          this.emit(gameId);
+        }
+        if (!downloadStarted) finish();
+      });
+      void browser.loadURL(url.href).catch((error: unknown) => {
+        this.fail(gameId, error);
+        browser.close();
+      });
     });
-    void browser.loadURL(url.href).catch((error: unknown) => this.fail(gameId, error));
   }
 
   private async finishInstall(gameId: number, archivePath: string, transfer: Transfer): Promise<void> {
@@ -570,6 +622,11 @@ export class DownloadManager {
     const game = this.database.getGame(gameId);
     if (!record || !game) throw new Error("Game disappeared while installing.");
     await mkdir(record.installDir, { recursive: true });
+    this.database.updateDownload(gameId, {
+      phase: "extracting",
+      phaseDetail: null,
+    });
+    this.emit(gameId);
     await extractArchive(archivePath, record.installDir);
     for (const modId of record.selectedModIds) {
       const downloadState = this.database.getDownload(gameId);
@@ -587,15 +644,30 @@ export class DownloadManager {
         record.installDir,
         transfer,
       );
+      this.database.updateDownload(gameId, {
+        phase: "applying-mods",
+        phaseDetail: mod.name,
+      });
+      this.emit(gameId);
       await applyModArchive(modArchive, mod, record.installDir, isDirectFileMod(mod));
     }
+    this.database.updateDownload(gameId, {
+      phase: "finalizing",
+      phaseDetail: null,
+    });
+    this.emit(gameId);
     const launcher = await findGameLauncher(record.installDir);
     if (!launcher) throw new Error("No compatible game launcher was found in the archive.");
     const current = this.database.getDownload(gameId);
     if (!current || current.status === "cancelled") {
       throw new Error("Installation was cancelled.");
     }
-    this.database.updateDownload(gameId, { status: "installed", error: null });
+    this.database.updateDownload(gameId, {
+      status: "installed",
+      error: null,
+      phase: null,
+      phaseDetail: null,
+    });
     this.transfers.delete(gameId);
     this.emit(gameId);
     if (record.runAfter) {
@@ -636,6 +708,8 @@ export class DownloadManager {
       bytesDownloaded: 0,
       totalBytes: null,
       error: null,
+      phase: "downloading-mod",
+      phaseDetail: mod.name,
     });
     this.emit(gameId);
 
@@ -746,6 +820,7 @@ export class DownloadManager {
             status: item.isPaused() ? "paused" : "downloading",
             bytesDownloaded: item.getReceivedBytes(),
             totalBytes: item.getTotalBytes() || null,
+            phase: "downloading-mod",
           });
           this.emit(gameId);
         });
@@ -786,6 +861,8 @@ export class DownloadManager {
     this.database.updateDownload(gameId, {
       status: "failed",
       error: error instanceof Error ? error.message : String(error),
+      phase: null,
+      phaseDetail: null,
     });
     this.emit(gameId);
   }

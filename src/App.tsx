@@ -114,10 +114,6 @@ function App() {
     const query = search.trim().toLowerCase();
     return query ? games.filter((game) => game.name.toLowerCase().includes(query)) : games;
   }, [games, search]);
-  const libraryGames = useMemo(() => {
-    const catalogIds = new Set(games.map((game) => game.id));
-    return [...games, ...library.filter((game) => !catalogIds.has(game.id))];
-  }, [games, library]);
   const installedIds = useMemo(() => new Set(library.map((game) => game.id)), [library]);
 
   const chooseDestination = async () => {
@@ -266,10 +262,8 @@ function App() {
         />
       ) : (
         <LibraryPage
-          games={libraryGames}
           installed={library}
           search={search}
-          onOpenGame={setSelected}
           onLaunch={(gameId) => void runAction(() => window.library.launchGame(gameId))}
           onStop={(gameId) => void runAction(() => window.library.stopGame(gameId))}
           onDelete={setDeleteTarget}

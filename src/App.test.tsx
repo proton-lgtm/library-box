@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthState, DesktopApi, Game, InstalledGame } from "./shared/types";
+import { DownloadsPage } from "./components/DownloadsPage";
 import App from "./App";
 
 const game: Game = {
@@ -192,7 +193,8 @@ describe("Electron game library UI", () => {
   });
 
   it("allows cancelling a failed download", async () => {
-    api.listDownloads = vi.fn().mockResolvedValue([{
+    api.listDownloads = vi.fn()
+      .mockResolvedValueOnce([{
       gameId: 1,
       gameName: "Sample Game",
       thumbnail: "",
@@ -201,12 +203,14 @@ describe("Electron game library UI", () => {
       totalBytes: 100,
       error: "Connection interrupted.",
       installDir: "C:\\Games\\Sample Game",
-    }]);
+      }])
+      .mockResolvedValue([]);
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Downloads" }));
     await user.click(screen.getByRole("button", { name: "Cancel Sample Game" }));
     await waitFor(() => expect(api.cancelDownload).toHaveBeenCalledWith(1));
+    expect(await screen.findByText("No active downloads")).toBeTruthy();
   });
 
   it("launches and stops installed games from the library", async () => {
@@ -218,12 +222,12 @@ describe("Electron game library UI", () => {
     const user = userEvent.setup();
     const { rerender } = render(<App />);
     await user.click(await screen.findByRole("button", { name: "Library" }));
-    await user.click(await screen.findByRole("button", { name: "Play" }));
+    await user.click(await screen.findByRole("button", { name: "Play Sample Game" }));
     await waitFor(() => expect(api.launchGame).toHaveBeenCalledWith(1));
     installed[0].running = true;
     rerender(<App key="updated-library" />);
     await user.click(await screen.findByRole("button", { name: "Library" }));
-    await user.click(await screen.findByRole("button", { name: "Stop" }));
+    await user.click(await screen.findByRole("button", { name: "Stop Sample Game" }));
     await waitFor(() => expect(api.stopGame).toHaveBeenCalledWith(1));
   });
 
@@ -237,10 +241,89 @@ describe("Electron game library UI", () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Library" }));
-    await user.click(await screen.findByRole("button", { name: "Delete Sample Game" }));
+    await user.click(await screen.findByLabelText("More options for Sample Game"));
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
     const deleteButtons = screen.getAllByRole("button", { name: /^Delete$/ });
     await user.click(deleteButtons[deleteButtons.length - 1]);
     await waitFor(() => expect(api.deleteGame).toHaveBeenCalledWith(1));
-    expect(await screen.findByRole("button", { name: "View Sample Game" })).toBeTruthy();
+    await user.click(screen.getByRole("tab", { name: "Installed" }));
+    expect(await screen.findByText("No installed games")).toBeTruthy();
+  });
+
+  it("shows only the Installed and Favorites library tabs", async () => {
+    const user = userEvent.setup();
+    installed = [{
+      ...game,
+      installDir: "C:\\Games\\Sample Game",
+      running: false,
+    }];
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Library" }));
+    expect((await screen.findByRole("tab", { name: "Installed" })).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("Sample Game")).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "All Games" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Not Installed" })).toBeNull();
+    await user.click(screen.getByRole("tab", { name: "Favorites" }));
+    expect(await screen.findByText("No favorite games")).toBeTruthy();
+  });
+
+  it("shows extraction and mod-application progress instead of download status", () => {
+    const download: import("./shared/types").Download = {
+      gameId: 1,
+      gameName: "Sample Game",
+      thumbnail: "",
+      status: "downloading",
+      bytesDownloaded: 100,
+      totalBytes: 100,
+      error: null,
+      installDir: "C:\\Games\\Sample Game",
+      phase: "applying-mods",
+      phaseDetail: "Community Patch",
+    };
+    const { rerender } = render(
+      <DownloadsPage downloads={[download]} onPause={vi.fn()} onResume={vi.fn()} onCancel={vi.fn()} />,
+    );
+    expect(screen.getByText("Applying mods")).toBeTruthy();
+    expect(screen.getByText("Applying Community Patch…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+
+    rerender(
+      <DownloadsPage
+        downloads={[{ ...download, phase: "extracting", phaseDetail: null }]}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Extracting")).toBeTruthy();
+    expect(screen.getByText("Extracting game archive…")).toBeTruthy();
+  });
+
+  it("estimates remaining download time from transfer progress", () => {
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValueOnce(1000).mockReturnValueOnce(3000);
+    const download: import("./shared/types").Download = {
+      gameId: 1,
+      gameName: "Sample Game",
+      thumbnail: "",
+      status: "downloading",
+      bytesDownloaded: 50,
+      totalBytes: 100,
+      error: null,
+      installDir: "C:\\Games\\Sample Game",
+    };
+    const { rerender } = render(
+      <DownloadsPage downloads={[download]} onPause={vi.fn()} onResume={vi.fn()} onCancel={vi.fn()} />,
+    );
+    rerender(
+      <DownloadsPage
+        downloads={[{ ...download, bytesDownloaded: 60 }]}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Less than a minute remaining")).toBeTruthy();
+    now.mockRestore();
   });
 });

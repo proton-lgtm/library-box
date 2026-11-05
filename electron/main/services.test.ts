@@ -310,7 +310,7 @@ describe("SQLite library", () => {
     database.close();
   });
 
-  it("refuses to delete an installed path that does not match the game folder", async () => {
+  it("does not delete an unrelated folder when the recorded install has no game launcher", async () => {
     const root = makeTempDirectory();
     const installDir = path.join(root, "unrelated");
     mkdirSync(installDir);
@@ -326,8 +326,116 @@ describe("SQLite library", () => {
     });
     const library = new LibraryManager(database, new Launcher(database));
 
-    await expect(library.deleteGame(1)).rejects.toThrow(/safe installation path/);
+    await expect(library.deleteGame(1)).resolves.toBeUndefined();
     expect(existsSync(installDir)).toBe(true);
+    expect(database.getDownload(1)).toBeUndefined();
+    expect(database.listLibrary()).toEqual([]);
+    database.close();
+  });
+
+  it("deletes a renamed install when its recorded folder contains the game launcher", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    const archivePath = path.join(installDir, "game.zip");
+    mkdirSync(installDir);
+    writeFileSync(path.join(installDir, "game.exe"), "game");
+    writeFileSync(archivePath, "archive");
+    const database = makeDatabase();
+    database.syncCatalog([{
+      id: "69e2af3e-4128-4e15-95a0-b90e33ae11cd",
+      name: "Sample Game",
+      thumbnail: "",
+      sizeBytes: null,
+      lastUpdated: null,
+      tags: [],
+      description: "",
+      releaseDate: null,
+      detailsLastUpdated: null,
+      developerLinks: {},
+      version: null,
+      operatingSystems: [],
+      downloadLinks: {},
+      mods: [],
+    }]);
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "installed",
+      archivePath,
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    database.syncCatalog([{
+      id: "69e2af3e-4128-4e15-95a0-b90e33ae11cd",
+      name: "Renamed Game",
+      thumbnail: "",
+      sizeBytes: null,
+      lastUpdated: null,
+      tags: [],
+      description: "",
+      releaseDate: null,
+      detailsLastUpdated: null,
+      developerLinks: {},
+      version: null,
+      operatingSystems: [],
+      downloadLinks: {},
+      mods: [],
+    }]);
+    const library = new LibraryManager(database, new Launcher(database));
+
+    await library.deleteGame(1);
+
+    expect(existsSync(installDir)).toBe(false);
+    expect(database.getDownload(1)).toBeUndefined();
+    expect(database.listLibrary()).toEqual([]);
+    database.close();
+  });
+
+  it("clears the installed record when the game folder is already missing", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    const database = makeDatabase();
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "installed",
+      archivePath: path.join(installDir, "game.zip"),
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    const library = new LibraryManager(database, new Launcher(database));
+
+    await library.deleteGame(1);
+
+    expect(database.getDownload(1)).toBeUndefined();
+    expect(database.listLibrary()).toEqual([]);
+    database.close();
+  });
+
+  it("clears a stale installed record if its launcher executable was removed", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    mkdirSync(installDir);
+    writeFileSync(path.join(installDir, "game.zip"), "archive");
+    const database = makeDatabase();
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "installed",
+      archivePath: path.join(installDir, "game.zip"),
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    const library = new LibraryManager(database, new Launcher(database));
+
+    await library.deleteGame(1);
+
+    expect(existsSync(installDir)).toBe(true);
+    expect(database.getDownload(1)).toBeUndefined();
+    expect(database.listLibrary()).toEqual([]);
     database.close();
   });
 });
@@ -371,23 +479,26 @@ describe("download controls", () => {
     manager.resume(1);
     await vi.waitFor(() => expect(requests).toHaveLength(2));
     expect(database.getDownload(1)?.status).toBe("downloading");
-    manager.cancel(1);
-    expect(database.getDownload(1)?.status).toBe("cancelled");
+    await manager.cancel(1);
+    expect(database.getDownload(1)).toBeUndefined();
+    expect(database.listDownloads()).toEqual([]);
     expect(requests[1]?.aborted).toBe(true);
     await new Promise((resolve) => setImmediate(resolve));
     database.close();
   });
 
-  it("allows cancelling a failed download without an active transfer", () => {
+  it("removes a failed download and its partial archive without an active transfer", async () => {
     const database = makeDatabase();
     const directory = makeTempDirectory();
     const installDir = path.join(directory, "Sample Game");
     mkdirSync(installDir);
+    const archivePath = path.join(installDir, "game.zip");
+    writeFileSync(`${archivePath}.part`, "partial download");
     database.saveDownload({
       gameId: 1,
       url: "https://downloads.example/game.zip",
       status: "failed",
-      archivePath: path.join(installDir, "game.zip"),
+      archivePath,
       installDir,
       runAfter: false,
       selectedModIds: [],
@@ -395,11 +506,10 @@ describe("download controls", () => {
     });
     const manager = new DownloadManager(database, new Launcher(database));
 
-    expect(() => manager.cancel(1)).not.toThrow();
-    expect(database.getDownload(1)).toMatchObject({
-      status: "cancelled",
-      error: null,
-    });
+    await expect(manager.cancel(1)).resolves.toBeUndefined();
+    expect(database.getDownload(1)).toBeUndefined();
+    expect(database.listDownloads()).toEqual([]);
+    expect(existsSync(`${archivePath}.part`)).toBe(false);
     database.close();
   });
 
@@ -445,6 +555,10 @@ describe("download controls", () => {
       }],
     }]));
     const manager = new DownloadManager(database, new Launcher(database));
+    const observedPhases = new Set<string>();
+    manager.onUpdate((update) => {
+      if (update.phase) observedPhases.add(update.phase);
+    });
     const gameBytes = await import("node:fs/promises").then(({ readFile }) => readFile(gameArchive));
     const modBytes = await import("node:fs/promises").then(({ readFile }) => readFile(modArchive));
     vi.stubGlobal("fetch", vi.fn((url: URL) => Promise.resolve(new Response(
@@ -461,6 +575,12 @@ describe("download controls", () => {
       selectedModIds: [0, 1],
     });
     await vi.waitFor(() => expect(database.getDownload(1)).toMatchObject({ status: "installed" }));
+    expect(observedPhases).toEqual(new Set([
+      "extracting",
+      "downloading-mod",
+      "applying-mods",
+      "finalizing",
+    ]));
     const installedRoot = path.join(root, "Modded Game");
     const installedPatch = path.join(installedRoot, "game", "patch.rpy");
     expect(await import("node:fs/promises").then(({ readFile }) => readFile(installedPatch, "utf8"))).toBe("patched");

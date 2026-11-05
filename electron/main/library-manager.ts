@@ -1,11 +1,7 @@
 import { lstat, rm } from "node:fs/promises";
 import path from "node:path";
 import type { LibraryDatabase } from "./database";
-import type { Launcher } from "./launcher";
-
-function safeFolderName(value: string): string {
-  return value.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/g, "").trim() || "game";
-}
+import { findGameLauncher, type Launcher } from "./launcher";
 
 export class LibraryManager {
   constructor(
@@ -26,11 +22,45 @@ export class LibraryManager {
     }
 
     const installDir = path.resolve(record.installDir);
-    if (!path.isAbsolute(record.installDir) ||
-        installDir === path.parse(installDir).root ||
-        path.basename(installDir) !== safeFolderName(game.name)) {
+    if (!path.isAbsolute(record.installDir) || installDir === path.parse(installDir).root) {
       throw new Error("The recorded game folder is not a safe installation path.");
     }
+
+    let details;
+    try {
+      details = await lstat(installDir);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        this.database.removeInstalledGame(gameId);
+        return;
+      }
+      throw error;
+    }
+    if (details.isSymbolicLink()) {
+      throw new Error("The installed game folder is not a regular directory.");
+    }
+    if (!details.isDirectory()) {
+      this.database.removeInstalledGame(gameId);
+      return;
+    }
+
+    let gameLauncher: string | undefined;
+    try {
+      gameLauncher = await findGameLauncher(installDir);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        this.database.removeInstalledGame(gameId);
+        return;
+      }
+      throw error;
+    }
+    if (!gameLauncher) {
+      this.database.removeInstalledGame(gameId);
+      return;
+    }
+
     const archivePath = path.resolve(record.archivePath);
     const rootArchive = path.dirname(archivePath) === installDir &&
       ["game.zip", "game.7z", "game.rar"].includes(path.basename(archivePath));
@@ -38,6 +68,11 @@ export class LibraryManager {
     const legacyArchive = archivePath === path.join(legacyDirectory, `${gameId}.archive`);
     if (!rootArchive && !legacyArchive) {
       throw new Error("The recorded game archive is not in its installation folder.");
+    }
+    const launcherRelativePath = path.relative(installDir, gameLauncher);
+    if (path.isAbsolute(launcherRelativePath) || launcherRelativePath === ".." ||
+        launcherRelativePath.startsWith(`..${path.sep}`)) {
+      throw new Error("The game launcher is outside its recorded installation folder.");
     }
     if (legacyArchive) {
       try {
@@ -49,11 +84,6 @@ export class LibraryManager {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    const details = await lstat(installDir);
-    if (details.isSymbolicLink() || !details.isDirectory()) {
-      throw new Error("The installed game folder is not a regular directory.");
-    }
-
     if (legacyArchive) {
       await rm(archivePath, { force: true });
       await rm(`${archivePath}.part`, { force: true });

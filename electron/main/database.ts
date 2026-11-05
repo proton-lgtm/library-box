@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync, statSync } from "node:fs";
 import path from "node:path";
-import type { Download, DownloadStatus, Game, GameMod, InstalledGame } from "../../src/shared/types";
+import type { Download, DownloadPhase, DownloadStatus, Game, GameMod, InstalledGame } from "../../src/shared/types";
 
 export interface CatalogEntry {
   id: string;
@@ -72,6 +72,8 @@ export class LibraryDatabase {
         status TEXT NOT NULL CHECK(status IN ('downloading','paused','cancelled','failed','installed')),
         bytes_downloaded INTEGER NOT NULL DEFAULT 0,
         total_bytes INTEGER,
+        phase TEXT,
+        phase_detail TEXT,
         archive_path TEXT NOT NULL,
         install_dir TEXT NOT NULL,
         run_after INTEGER NOT NULL DEFAULT 0,
@@ -95,6 +97,12 @@ export class LibraryDatabase {
     }
     if (!downloadColumns.some((column) => column.name === "selected_mods")) {
       this.db.exec("ALTER TABLE downloads ADD COLUMN selected_mods TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!downloadColumns.some((column) => column.name === "phase")) {
+      this.db.exec("ALTER TABLE downloads ADD COLUMN phase TEXT");
+    }
+    if (!downloadColumns.some((column) => column.name === "phase_detail")) {
+      this.db.exec("ALTER TABLE downloads ADD COLUMN phase_detail TEXT");
     }
   }
 
@@ -256,7 +264,9 @@ export class LibraryDatabase {
     return this.db.prepare(`
       SELECT d.game_id AS gameId, g.name AS gameName, g.thumbnail,
         d.status, d.bytes_downloaded AS bytesDownloaded,
-        d.total_bytes AS totalBytes, d.error, d.install_dir AS installDir
+        d.total_bytes AS totalBytes, g.size_bytes AS expectedBytes,
+        d.error, d.install_dir AS installDir,
+        d.phase, d.phase_detail AS phaseDetail
       FROM downloads d JOIN games g ON g.id=d.game_id
       WHERE d.status != 'installed'
       ORDER BY d.updated_at DESC
@@ -287,6 +297,13 @@ export class LibraryDatabase {
     if (result.changes !== 1) throw new Error("Installed game record was not found.");
   }
 
+  removeCancelledDownload(gameId: number): void {
+    const result = this.db.prepare(
+      "DELETE FROM downloads WHERE game_id=? AND status='cancelled'",
+    ).run(gameId);
+    if (result.changes !== 1) throw new Error("Cancelled download was not found.");
+  }
+
   private reconcileMissingInstallations(): void {
     const installed = this.db.prepare(
       "SELECT game_id AS gameId, install_dir AS installDir FROM downloads WHERE status='installed'",
@@ -315,6 +332,7 @@ export class LibraryDatabase {
       SELECT d.game_id AS gameId, g.name AS gameName, g.thumbnail,
         d.status, d.bytes_downloaded AS bytesDownloaded,
         d.total_bytes AS totalBytes, d.error, d.install_dir AS installDir,
+        d.phase, d.phase_detail AS phaseDetail,
         d.archive_path AS archivePath, d.url, d.run_after AS runAfter,
         d.selected_mods AS selectedMods
       FROM downloads d JOIN games g ON g.id=d.game_id
@@ -324,11 +342,15 @@ export class LibraryDatabase {
       url: string;
       runAfter: number;
       selectedMods: string;
+      phase: DownloadPhase | null;
+      phaseDetail: string | null;
     }) | undefined;
     return row ? {
       ...row,
       runAfter: row.runAfter === 1,
       selectedModIds: JSON.parse(row.selectedMods) as number[],
+      phase: row.phase as DownloadPhase | null,
+      phaseDetail: row.phaseDetail,
     } : undefined;
   }
 
@@ -343,16 +365,20 @@ export class LibraryDatabase {
     bytesDownloaded?: number;
     totalBytes?: number | null;
     error?: string | null;
+    phase?: DownloadPhase | null;
+    phaseDetail?: string | null;
   }): void {
     this.db.prepare(`
       INSERT INTO downloads
-        (game_id,url,status,bytes_downloaded,total_bytes,archive_path,install_dir,run_after,selected_mods,error,updated_at)
-      VALUES (@gameId,@url,@status,@bytesDownloaded,@totalBytes,@archivePath,@installDir,@runAfter,@selectedMods,@error,CURRENT_TIMESTAMP)
+        (game_id,url,status,bytes_downloaded,total_bytes,phase,phase_detail,archive_path,install_dir,run_after,selected_mods,error,updated_at)
+      VALUES (@gameId,@url,@status,@bytesDownloaded,@totalBytes,@phase,@phaseDetail,@archivePath,@installDir,@runAfter,@selectedMods,@error,CURRENT_TIMESTAMP)
       ON CONFLICT(game_id) DO UPDATE SET
         url=excluded.url,
         status=excluded.status,
         bytes_downloaded=excluded.bytes_downloaded,
         total_bytes=excluded.total_bytes,
+        phase=excluded.phase,
+        phase_detail=excluded.phase_detail,
         archive_path=excluded.archive_path,
         install_dir=excluded.install_dir,
         run_after=excluded.run_after,
@@ -363,6 +389,8 @@ export class LibraryDatabase {
       ...download,
       bytesDownloaded: download.bytesDownloaded ?? 0,
       totalBytes: download.totalBytes ?? null,
+      phase: download.phase ?? null,
+      phaseDetail: download.phaseDetail ?? null,
       runAfter: download.runAfter ? 1 : 0,
       selectedMods: JSON.stringify(download.selectedModIds ?? []),
       error: download.error ?? null,
@@ -371,7 +399,7 @@ export class LibraryDatabase {
 
   updateDownload(
     gameId: number,
-    patch: Partial<Pick<Download, "status" | "bytesDownloaded" | "totalBytes" | "error">>,
+    patch: Partial<Pick<Download, "status" | "bytesDownloaded" | "totalBytes" | "error" | "phase" | "phaseDetail">>,
   ): void {
     const current = this.getDownload(gameId);
     if (!current) throw new Error("Download not found.");
@@ -388,7 +416,8 @@ export class LibraryDatabase {
   recoverInterruptedDownloads(): void {
     this.db.prepare(`
       UPDATE downloads
-      SET status='failed', error='The app closed before this download finished.',
+      SET status='failed', phase=NULL, phase_detail=NULL,
+          error='The app closed before this download finished.',
           updated_at=CURRENT_TIMESTAMP
       WHERE status IN ('downloading','paused')
     `).run();

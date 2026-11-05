@@ -5,6 +5,12 @@ export type DownloadStatus =
   | "failed"
   | "installed";
 
+export type DownloadPhase =
+  | "extracting"
+  | "downloading-mod"
+  | "applying-mods"
+  | "finalizing";
+
 export interface ModStep {
   type: "extract" | "move";
   target_folder: string;
@@ -62,8 +68,11 @@ export interface Download {
   status: DownloadStatus;
   bytesDownloaded: number;
   totalBytes: number | null;
+  expectedBytes?: number | null;
   error: string | null;
   installDir: string;
+  phase?: DownloadPhase | null;
+  phaseDetail?: string | null;
 }
 
 export interface InstalledGame extends Game {
@@ -77,6 +86,8 @@ export interface DownloadUpdate {
   totalBytes: number | null;
   status: DownloadStatus;
   error: string | null;
+  phase?: DownloadPhase | null;
+  phaseDetail?: string | null;
 }
 
 export interface StartDownloadInput {
