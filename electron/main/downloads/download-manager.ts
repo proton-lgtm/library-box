@@ -3,10 +3,10 @@ import { createWriteStream, existsSync, statSync } from "node:fs";
 import { lstat, mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { once } from "node:events";
 import path from "node:path";
-import type { DownloadUpdate, GameMod, StartDownloadInput } from "../../src/shared/types";
-import { extractArchive, isSupportedArchive } from "./archive";
-import type { LibraryDatabase } from "./database";
-import { findGameLauncher, type Launcher } from "./launcher";
+import type { DownloadUpdate, GameMod, StartDownloadInput } from "../../../src/shared/types";
+import { extractArchive, findGameRootInArchive, isSupportedArchive } from "../archive";
+import type { LibraryDatabase } from "../database";
+import { findGameLauncher, type Launcher } from "../launcher";
 import { applyModArchive } from "./mod-installer";
 
 interface Transfer {
@@ -203,8 +203,10 @@ export class DownloadManager {
       url: url.href,
       archivePath,
       installDir,
+      gameRoot: installDir,
       runAfter: input.runAfter,
       selectedModIds,
+      appliedModIds: [],
       phase: null,
     });
     const transfer: Transfer = {};
@@ -383,6 +385,78 @@ export class DownloadManager {
     }
     await Promise.all(partialArchives.map((partialPath) => rm(partialPath, { force: true })));
     this.database.removeCancelledDownload(gameId);
+  }
+
+  async applyMods(gameId: number, requestedModIds: number[]): Promise<void> {
+    const record = this.database.getDownload(gameId);
+    if (!record || record.status !== "installed") {
+      throw new Error("Mods can only be applied to an installed game.");
+    }
+    if (this.launcher.runningIds().has(gameId)) {
+      throw new Error("Stop the game before applying mods.");
+    }
+    if (this.transfers.has(gameId)) throw new Error("This game already has an active operation.");
+    const game = this.database.getGame(gameId);
+    if (!game) throw new Error("Game not found.");
+    const modIds = [...new Set(requestedModIds)];
+    for (const modId of modIds) {
+      if (!Number.isInteger(modId) || modId < 0 || !game.mods[modId]) {
+        throw new Error(`Selected mod ${modId + 1} was not found.`);
+      }
+      if (record.appliedModIds.includes(modId)) {
+        throw new Error(`Mod "${game.mods[modId].name}" has already been applied.`);
+      }
+      if (!preferredModUrl(game.mods[modId])) {
+        throw new Error(`Mod "${game.mods[modId].name}" has no configured download link.`);
+      }
+    }
+    if (modIds.length === 0) return;
+
+    const transfer: Transfer = {};
+    this.transfers.set(gameId, transfer);
+    try {
+      for (const modId of modIds) {
+        const mod = game.mods[modId];
+        const url = preferredModUrl(mod);
+        if (!url) throw new Error(`Mod "${mod.name}" has no configured download link.`);
+        this.database.updateDownload(gameId, {
+          phase: "downloading-mod",
+          phaseDetail: mod.name,
+        });
+        this.emit(gameId);
+        const modArchive = await this.downloadMod(
+          gameId,
+          mod,
+          safeUrl(url),
+          record.installDir,
+          transfer,
+          true,
+        );
+        this.database.updateDownload(gameId, {
+          phase: "applying-mods",
+          phaseDetail: mod.name,
+        });
+        this.emit(gameId);
+        await applyModArchive(modArchive, mod, record.gameRoot, isDirectFileMod(mod));
+        const latest = this.database.getDownload(gameId);
+        if (!latest || latest.status !== "installed") {
+          throw new Error("The installed game record changed while applying mods.");
+        }
+        this.database.updateDownload(gameId, {
+          appliedModIds: [...latest.appliedModIds, modId],
+          phase: null,
+          phaseDetail: null,
+        });
+        this.emit(gameId);
+      }
+    } finally {
+      this.transfers.delete(gameId);
+      const current = this.database.getDownload(gameId);
+      if (current?.status === "installed" && current.phase) {
+        this.database.updateDownload(gameId, { phase: null, phaseDetail: null });
+        this.emit(gameId);
+      }
+    }
   }
 
   private requireTransfer(gameId: number): Transfer {
@@ -622,6 +696,8 @@ export class DownloadManager {
     const game = this.database.getGame(gameId);
     if (!record || !game) throw new Error("Game disappeared while installing.");
     await mkdir(record.installDir, { recursive: true });
+    const gameRoot = await findGameRootInArchive(archivePath, record.installDir);
+    this.database.updateDownload(gameId, { gameRoot });
     this.database.updateDownload(gameId, {
       phase: "extracting",
       phaseDetail: null,
@@ -649,14 +725,19 @@ export class DownloadManager {
         phaseDetail: mod.name,
       });
       this.emit(gameId);
-      await applyModArchive(modArchive, mod, record.installDir, isDirectFileMod(mod));
+      await applyModArchive(modArchive, mod, gameRoot, isDirectFileMod(mod));
+      const latest = this.database.getDownload(gameId);
+      if (!latest) throw new Error("The installed game record was lost while applying mods.");
+      this.database.updateDownload(gameId, {
+        appliedModIds: [...latest.appliedModIds, modId],
+      });
     }
     this.database.updateDownload(gameId, {
       phase: "finalizing",
       phaseDetail: null,
     });
     this.emit(gameId);
-    const launcher = await findGameLauncher(record.installDir);
+    const launcher = await findGameLauncher(gameRoot);
     if (!launcher) throw new Error("No compatible game launcher was found in the archive.");
     const current = this.database.getDownload(gameId);
     if (!current || current.status === "cancelled") {
@@ -689,6 +770,7 @@ export class DownloadManager {
     initialUrl: URL,
     archiveDirectory: string,
     transfer: Transfer,
+    keepInstalledStatus = false,
   ): Promise<string> {
     const extension = path.extname(initialUrl.pathname).toLowerCase();
     const directFile = isDirectFileMod(mod);
@@ -704,9 +786,11 @@ export class DownloadManager {
     }
     await rm(partPath, { force: true });
     this.database.updateDownload(gameId, {
-      status: "downloading",
-      bytesDownloaded: 0,
-      totalBytes: null,
+      ...(keepInstalledStatus ? {} : {
+        status: "downloading" as const,
+        bytesDownloaded: 0,
+        totalBytes: null,
+      }),
       error: null,
       phase: "downloading-mod",
       phaseDetail: mod.name,
@@ -714,7 +798,14 @@ export class DownloadManager {
     this.emit(gameId);
 
     if (isBrowserHost(initialUrl)) {
-      return this.downloadModInBrowser(gameId, initialUrl, modArchive, partPath, transfer);
+      return this.downloadModInBrowser(
+        gameId,
+        initialUrl,
+        modArchive,
+        partPath,
+        transfer,
+        keepInstalledStatus,
+      );
     }
 
     const controller = new AbortController();
@@ -780,6 +871,7 @@ export class DownloadManager {
     modArchive: string,
     partPath: string,
     transfer: Transfer,
+    keepInstalledStatus: boolean,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       const browser = new BrowserWindow({
@@ -817,7 +909,9 @@ export class DownloadManager {
         item.setSavePath(partPath);
         item.on("updated", () => {
           this.database.updateDownload(gameId, {
-            status: item.isPaused() ? "paused" : "downloading",
+            ...(keepInstalledStatus ? {} : {
+              status: item.isPaused() ? "paused" as const : "downloading" as const,
+            }),
             bytesDownloaded: item.getReceivedBytes(),
             totalBytes: item.getTotalBytes() || null,
             phase: "downloading-mod",

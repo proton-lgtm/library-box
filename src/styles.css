@@ -340,7 +340,7 @@ input:focus-visible {
 
 .game-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 21px 19px;
 }
 
@@ -1244,6 +1244,34 @@ input:focus-visible {
 .library-menu-popover button:disabled {
   cursor: not-allowed;
   opacity: .45;
+}
+
+.library-menu-popover button+button {
+  margin-top: 2px;
+}
+
+.apply-mod-picker {
+  max-height: 340px;
+}
+
+.mod-applied-label {
+  margin-left: auto;
+  color: #58d7a8;
+  font-size: 11px;
+}
+
+.mod-option input:disabled {
+  opacity: .85;
+}
+
+.dialog-error {
+  margin: 14px 0 0;
+  color: #ffb7c5;
+  font-size: 13px;
+}
+
+.apply-mods-button {
+  margin-top: 14px;
 }
 
 .toast-error {

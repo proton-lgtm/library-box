@@ -52,6 +52,7 @@ beforeEach(() => {
     pauseDownload: vi.fn().mockResolvedValue(undefined),
     resumeDownload: vi.fn().mockResolvedValue(undefined),
     cancelDownload: vi.fn().mockResolvedValue(undefined),
+    applyMods: vi.fn().mockResolvedValue(undefined),
     launchGame: vi.fn().mockResolvedValue(undefined),
     stopGame: vi.fn().mockResolvedValue(undefined),
     deleteGame: vi.fn().mockResolvedValue(undefined),
@@ -217,6 +218,8 @@ describe("Electron game library UI", () => {
     installed = [{
       ...game,
       installDir: "C:\\Games\\Sample Game",
+      gameRoot: "C:\\Games\\Sample Game",
+      appliedModIds: [],
       running: false,
     }];
     const user = userEvent.setup();
@@ -235,6 +238,8 @@ describe("Electron game library UI", () => {
     installed = [{
       ...game,
       installDir: "C:\\Games\\Sample Game",
+      gameRoot: "C:\\Games\\Sample Game",
+      appliedModIds: [],
       running: false,
     }];
     api.deleteGame = vi.fn().mockImplementation(async () => { installed = []; });
@@ -250,11 +255,50 @@ describe("Electron game library UI", () => {
     expect(await screen.findByText("No installed games")).toBeTruthy();
   });
 
+  it("opens installed mod choices and only submits newly selected mods", async () => {
+    const gameWithMods: Game = {
+      ...game,
+      mods: [
+        {
+          name: "Applied Patch",
+          download_links: { direct_link: "https://downloads.example/applied.zip" },
+          steps_to_apply: [],
+        },
+        {
+          name: "Optional Patch",
+          download_links: { direct_link: "https://downloads.example/optional.zip" },
+          steps_to_apply: [],
+        },
+      ],
+    };
+    installed = [{
+      ...gameWithMods,
+      installDir: "C:\\Games\\Sample Game",
+      gameRoot: "C:\\Games\\Sample Game",
+      appliedModIds: [0],
+      running: false,
+    }];
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Library" }));
+    await user.click(await screen.findByLabelText("More options for Sample Game"));
+    await user.click(screen.getByRole("menuitem", { name: "Mods" }));
+    const appliedCheckbox = screen.getByRole("checkbox", { name: /Applied Patch/ });
+    expect((appliedCheckbox as HTMLInputElement).checked).toBe(true);
+    expect((appliedCheckbox as HTMLInputElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "Apply mods" })).toBeNull();
+    await user.click(screen.getByRole("checkbox", { name: /Optional Patch/ }));
+    await user.click(screen.getByRole("button", { name: "Apply mods" }));
+    await waitFor(() => expect(api.applyMods).toHaveBeenCalledWith(1, [1]));
+  });
+
   it("shows only the Installed and Favorites library tabs", async () => {
     const user = userEvent.setup();
     installed = [{
       ...game,
       installDir: "C:\\Games\\Sample Game",
+      gameRoot: "C:\\Games\\Sample Game",
+      appliedModIds: [],
       running: false,
     }];
     render(<App />);
@@ -297,6 +341,7 @@ describe("Electron game library UI", () => {
     );
     expect(screen.getByText("Extracting")).toBeTruthy();
     expect(screen.getByText("Extracting game archive…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Cancel Sample Game" })).toBeNull();
   });
 
   it("estimates remaining download time from transfer progress", () => {

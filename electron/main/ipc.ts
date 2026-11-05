@@ -2,7 +2,7 @@ import { BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from "e
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import type { DownloadManager } from "./download-manager";
+import type { DownloadManager } from "./downloads/download-manager";
 import type { LibraryDatabase } from "./database";
 import type { LibraryManager } from "./library-manager";
 import type { Launcher } from "./launcher";
@@ -10,6 +10,10 @@ import type { SupabaseService } from "./supabase-service";
 import { authCredentialsSchema, externalUrlSchema } from "./ipc-validation";
 
 const gameIdSchema = z.number().int().positive();
+const applyModsSchema = z.object({
+  gameId: gameIdSchema,
+  modIds: z.array(z.number().int().nonnegative()).max(100),
+}).strict();
 const startDownloadSchema = z.object({
   gameId: gameIdSchema,
   url: z.string().url().max(4096),
@@ -74,6 +78,10 @@ export function registerIpc(
   handle("library:pause-download", (gameId) => downloads.pause(gameIdSchema.parse(gameId)));
   handle("library:resume-download", (gameId) => downloads.resume(gameIdSchema.parse(gameId)));
   handle("library:cancel-download", (gameId) => downloads.cancel(gameIdSchema.parse(gameId)));
+  handle("library:apply-mods", (gameId, modIds) => {
+    const parsed = applyModsSchema.parse({ gameId, modIds });
+    return downloads.applyMods(parsed.gameId, parsed.modIds);
+  });
   handle("library:launch-game", (gameId) => launcher.launch(gameIdSchema.parse(gameId)));
   handle("library:stop-game", (gameId) => launcher.stop(gameIdSchema.parse(gameId)));
   handle("library:delete-game", (gameId) => library.deleteGame(gameIdSchema.parse(gameId)));

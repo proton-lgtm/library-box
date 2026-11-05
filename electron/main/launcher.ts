@@ -24,6 +24,11 @@ export async function findGameLauncher(root: string): Promise<string | undefined
     }
   }
   await walk(root, 0);
+  candidates.sort((left, right) => {
+    const leftDepth = path.relative(root, left).split(path.sep).length;
+    const rightDepth = path.relative(root, right).split(path.sep).length;
+    return leftDepth - rightDepth || left.localeCompare(right);
+  });
   for (const candidate of candidates) {
     if (process.platform !== "linux") return candidate;
     try {
@@ -54,10 +59,14 @@ export class Launcher {
     const game = this.database.getDownload(gameId);
     if (!game || game.status !== "installed") throw new Error("Game is not installed.");
     const installDir = path.resolve(game.installDir);
-    const candidate = await findGameLauncher(installDir);
+    const gameRoot = path.resolve(game.gameRoot || installDir);
+    if (gameRoot !== installDir && !gameRoot.startsWith(`${installDir}${path.sep}`)) {
+      throw new Error("The recorded game root is outside its installation folder.");
+    }
+    const candidate = await findGameLauncher(gameRoot);
     if (!candidate) throw new Error("No compatible game launcher was found.");
-    if (candidate !== installDir && !candidate.startsWith(`${installDir}${path.sep}`)) {
-      throw new Error("The game launcher is outside its installation folder.");
+    if (candidate !== gameRoot && !candidate.startsWith(`${gameRoot}${path.sep}`)) {
+      throw new Error("The game launcher is outside its recorded game root.");
     }
 
     const isAppBundle = process.platform === "darwin" && candidate.endsWith(".app");

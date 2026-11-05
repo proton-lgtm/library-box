@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, Menu, safeStorage } from "electron";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { LibraryDatabase } from "./database";
-import { DownloadManager } from "./download-manager";
+import { DownloadManager } from "./downloads/download-manager";
 import { registerIpc } from "./ipc";
 import { Launcher } from "./launcher";
 import { LibraryManager } from "./library-manager";

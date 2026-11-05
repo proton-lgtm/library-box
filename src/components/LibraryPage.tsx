@@ -1,4 +1,4 @@
-import { MoreVertical, Play, ShieldCheck, Square, Trash2 } from "lucide-react";
+import { MoreVertical, Play, Puzzle, ShieldCheck, Square, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { InstalledGame } from "../shared/types";
 import { Cover } from "./Cover";
@@ -11,6 +11,7 @@ interface LibraryPageProps {
   onLaunch: (gameId: number) => void;
   onStop: (gameId: number) => void;
   onDelete: (game: InstalledGame) => void;
+  onApplyMods: (game: InstalledGame) => void;
 }
 
 export function LibraryPage({
@@ -19,6 +20,7 @@ export function LibraryPage({
   onLaunch,
   onStop,
   onDelete,
+  onApplyMods,
 }: LibraryPageProps) {
   const [tab, setTab] = useState<LibraryTab>("installed");
   const query = search.trim().toLowerCase();
@@ -77,6 +79,15 @@ export function LibraryPage({
                         <MoreVertical size={18} />
                       </summary>
                       <div className="library-menu-popover" role="menu">
+                        <button
+                          role="menuitem"
+                          onClick={(event) => {
+                            event.currentTarget.closest("details")?.removeAttribute("open");
+                            onApplyMods(installedGame);
+                          }}
+                        >
+                          <Puzzle size={15} /> Mods
+                        </button>
                         <button
                           role="menuitem"
                           disabled={installedGame.running}

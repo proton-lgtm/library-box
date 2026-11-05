@@ -9,6 +9,7 @@ interface GameDetailsPageProps {
   onBack: () => void;
   onDownload: () => void;
   onLaunch: () => void;
+  onApplyMods: () => void;
   onOpenExternal: (url: string) => void;
 }
 
@@ -18,6 +19,7 @@ export function GameDetailsPage({
   onBack,
   onDownload,
   onLaunch,
+  onApplyMods,
   onOpenExternal,
 }: GameDetailsPageProps) {
   const mainDownload = bestDownloadLink(game);
@@ -70,16 +72,19 @@ export function GameDetailsPage({
                 <h2><Puzzle size={21} /> Mods &amp; extras</h2>
                 <div className="mods-list">
                   {game.mods.map((mod, index) => {
-                    const modLink = Object.entries(mod.download_links)[0];
                     return (
                       <article className="mod-card" key={`${mod.name}-${index}`}>
                         <span className="mod-icon"><Puzzle size={27} /></span>
                         <span className="mod-description"><strong>{mod.name}</strong><small>Optional content for {game.name}.</small></span>
-                        {modLink && <button className="button-outline" aria-label={`Download ${mod.name}`} onClick={() => onOpenExternal(modLink[1])}><ArrowDownToLine size={16} /> Download</button>}
                       </article>
                     );
                   })}
                 </div>
+                {installed && (
+                  <button className="button-outline apply-mods-button" onClick={onApplyMods}>
+                    <Puzzle size={16} /> Apply mods
+                  </button>
+                )}
               </section>
             )}
 

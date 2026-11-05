@@ -77,6 +77,8 @@ export interface Download {
 
 export interface InstalledGame extends Game {
   installDir: string;
+  gameRoot: string;
+  appliedModIds: number[];
   running: boolean;
 }
 
@@ -113,6 +115,7 @@ export interface DesktopApi {
   pauseDownload(gameId: number): Promise<void>;
   resumeDownload(gameId: number): Promise<void>;
   cancelDownload(gameId: number): Promise<void>;
+  applyMods(gameId: number, modIds: number[]): Promise<void>;
   launchGame(gameId: number): Promise<void>;
   stopGame(gameId: number): Promise<void>;
   deleteGame(gameId: number): Promise<void>;

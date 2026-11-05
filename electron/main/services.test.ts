@@ -8,10 +8,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { path7za } from "7zip-bin";
 import { validateArchivePaths, extractArchive } from "./archive";
 import { canTransition, LibraryDatabase } from "./database";
-import { DownloadManager } from "./download-manager";
+import { DownloadManager } from "./downloads/download-manager";
 import { Launcher } from "./launcher";
 import { LibraryManager } from "./library-manager";
-import { applyModArchive } from "./mod-installer";
+import { applyModArchive } from "./downloads/mod-installer";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -575,6 +575,14 @@ describe("download controls", () => {
       selectedModIds: [0, 1],
     });
     await vi.waitFor(() => expect(database.getDownload(1)).toMatchObject({ status: "installed" }));
+    expect(database.getDownload(1)).toMatchObject({
+      gameRoot: path.join(root, "Modded Game"),
+      appliedModIds: [0, 1],
+    });
+    expect(database.listLibrary()[0]).toMatchObject({
+      gameRoot: path.join(root, "Modded Game"),
+      appliedModIds: [0, 1],
+    });
     expect(observedPhases).toEqual(new Set([
       "extracting",
       "downloading-mod",
@@ -590,6 +598,40 @@ describe("download controls", () => {
     expect(existsSync(path.join(installedRoot, "Patch.zip"))).toBe(true);
     expect(existsSync(path.join(installedRoot, "Direct Fix.dll"))).toBe(true);
     expect(existsSync(path.join(root, ".redline-downloads"))).toBe(false);
+    database.close();
+  });
+
+  it("uses the nested folder containing the game executable as the saved game root", async () => {
+    const root = makeTempDirectory();
+    const source = path.join(root, "source");
+    const nestedGameRoot = path.join(source, "Game Bundle", "Windows");
+    mkdirSync(nestedGameRoot, { recursive: true });
+    writeFileSync(path.join(nestedGameRoot, "game.exe"), "launcher");
+    const archivePath = path.join(root, "nested-game.zip");
+    execFileSync(path7za, ["a", archivePath, "Game Bundle"], {
+      cwd: source,
+      windowsHide: true,
+    });
+    const database = makeDatabase();
+    const manager = new DownloadManager(database, new Launcher(database));
+    const archiveBytes = await import("node:fs/promises").then(({ readFile }) => readFile(archivePath));
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(archiveBytes, {
+      status: 200,
+      headers: { "content-type": "application/zip" },
+    }))));
+
+    await manager.start({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      destination: root,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    await vi.waitFor(() => expect(database.getDownload(1)).toMatchObject({ status: "installed" }));
+
+    const installDir = path.join(root, "Sample Game");
+    expect(database.getDownload(1)?.gameRoot).toBe(path.join(installDir, "Game Bundle", "Windows"));
+    expect(existsSync(path.join(installDir, "Game Bundle", "Windows", "game.exe"))).toBe(true);
     database.close();
   });
 
@@ -744,8 +786,9 @@ describe("game launch and stop", () => {
   it("spawns the game without a shell and stops its process tree", async () => {
     const directory = makeTempDirectory();
     const gameDirectory = path.join(directory, "game");
-    mkdirSync(gameDirectory);
-    const executable = path.join(gameDirectory, process.platform === "win32" ? "game.exe" : "game.sh");
+    const gameRoot = path.join(gameDirectory, "Game Bundle");
+    mkdirSync(gameRoot, { recursive: true });
+    const executable = path.join(gameRoot, process.platform === "win32" ? "game.exe" : "game.sh");
     writeFileSync(executable, "test launcher");
     if (process.platform !== "win32") chmodSync(executable, 0o755);
     const database = makeDatabase();
@@ -755,6 +798,7 @@ describe("game launch and stop", () => {
       status: "installed",
       archivePath: path.join(directory, "game.archive"),
       installDir: gameDirectory,
+      gameRoot,
       runAfter: false,
       selectedModIds: [],
     });
@@ -771,7 +815,7 @@ describe("game launch and stop", () => {
       1,
       executable,
       [],
-      expect.objectContaining({ shell: false, cwd: gameDirectory }),
+      expect.objectContaining({ shell: false, cwd: gameRoot }),
     );
     expect(launcher.runningIds().has(1)).toBe(true);
     launcher.stop(1);

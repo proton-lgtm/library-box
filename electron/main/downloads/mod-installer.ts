@@ -1,7 +1,7 @@
 import { cp, lstat, mkdir, readdir, rm, rmdir } from "node:fs/promises";
 import path from "node:path";
-import { extractArchive, isSupportedArchive } from "./archive";
-import type { GameMod } from "../../src/shared/types";
+import { extractArchive, isSupportedArchive } from "../archive";
+import type { GameMod } from "../../../src/shared/types";
 
 function resolveInside(base: string, value: string, gameRoot?: string): string {
   const expanded = value.includes("%GAME_ROOT%")

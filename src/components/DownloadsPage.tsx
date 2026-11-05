@@ -143,7 +143,9 @@ export function DownloadsPage({ downloads, onPause, onResume, onCancel }: Downlo
                     ) : download.status !== "downloading" ? (
                       <button className="action-button" onClick={() => onResume(download.gameId)}><Play size={16} /> Resume</button>
                     ) : null}
-                    <button className="icon-button cancel-button" onClick={() => onCancel(download.gameId)} aria-label={`Cancel ${download.gameName}`}><X size={18} /></button>
+                    {download.phase !== "extracting" && (
+                      <button className="icon-button cancel-button" onClick={() => onCancel(download.gameId)} aria-label={`Cancel ${download.gameName}`}><X size={18} /></button>
+                    )}
                   </div>
                 </article>
               );

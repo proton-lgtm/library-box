@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw, X } from "lucide-react";
 import type { AuthCredentials, AuthState, Download, Game, InstalledGame } from "./shared/types";
 import { AppShell, type Page } from "./components/AppShell";
+import { ApplyModsDialog } from "./components/ApplyModsDialog";
 import { DeleteDialog } from "./components/DeleteDialog";
 import { DownloadDialog } from "./components/DownloadDialog";
 import { DownloadsPage } from "./components/DownloadsPage";
@@ -25,9 +26,11 @@ function App() {
   );
   const [downloadDialog, setDownloadDialog] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<InstalledGame | null>(null);
+  const [modsTarget, setModsTarget] = useState<InstalledGame | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
   const [busy, setBusy] = useState(true);
   const [starting, setStarting] = useState(false);
+  const [applyingMods, setApplyingMods] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [error, setError] = useState("");
   const [catalogStale, setCatalogStale] = useState(false);
@@ -115,6 +118,9 @@ function App() {
     return query ? games.filter((game) => game.name.toLowerCase().includes(query)) : games;
   }, [games, search]);
   const installedIds = useMemo(() => new Set(library.map((game) => game.id)), [library]);
+  const selectedInstalledGame = selected
+    ? library.find((game) => game.id === selected.id)
+    : undefined;
 
   const chooseDestination = async () => {
     try {
@@ -190,6 +196,17 @@ function App() {
     }
   };
 
+  const applyMods = async (modIds: number[]) => {
+    if (!modsTarget || applyingMods) return;
+    setApplyingMods(true);
+    try {
+      await window.library.applyMods(modsTarget.id, modIds);
+      await refresh();
+    } finally {
+      setApplyingMods(false);
+    }
+  };
+
   const toggleMaximize = async () => {
     try {
       setMaximized(await window.library.toggleMaximizeWindow());
@@ -249,6 +266,9 @@ function App() {
           onBack={() => setSelected(null)}
           onDownload={() => setDownloadDialog(true)}
           onLaunch={() => void runAction(() => window.library.launchGame(selected.id))}
+          onApplyMods={() => {
+            if (selectedInstalledGame) setModsTarget(selectedInstalledGame);
+          }}
           onOpenExternal={openExternal}
         />
       ) : page === "home" ? (
@@ -267,6 +287,7 @@ function App() {
           onLaunch={(gameId) => void runAction(() => window.library.launchGame(gameId))}
           onStop={(gameId) => void runAction(() => window.library.stopGame(gameId))}
           onDelete={setDeleteTarget}
+          onApplyMods={setModsTarget}
         />
       )}
 
@@ -293,6 +314,17 @@ function App() {
           game={deleteTarget}
           onCancel={() => setDeleteTarget(null)}
           onConfirm={() => void confirmDelete()}
+        />
+      )}
+      {modsTarget && (
+        <ApplyModsDialog
+          key={modsTarget.id}
+          game={modsTarget}
+          applying={applyingMods}
+          onApply={applyMods}
+          onClose={() => {
+            if (!applyingMods) setModsTarget(null);
+          }}
         />
       )}
     </AppShell>

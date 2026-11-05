@@ -37,6 +37,8 @@ interface GameDatabaseRow {
   download_links: string;
   mods: string;
   installDir?: string | null;
+  gameRoot?: string | null;
+  appliedMods?: string;
 }
 
 export class LibraryDatabase {
@@ -76,8 +78,10 @@ export class LibraryDatabase {
         phase_detail TEXT,
         archive_path TEXT NOT NULL,
         install_dir TEXT NOT NULL,
+        game_root TEXT,
         run_after INTEGER NOT NULL DEFAULT 0,
         selected_mods TEXT NOT NULL DEFAULT '[]',
+        applied_mods TEXT NOT NULL DEFAULT '[]',
         error TEXT,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
@@ -103,6 +107,12 @@ export class LibraryDatabase {
     }
     if (!downloadColumns.some((column) => column.name === "phase_detail")) {
       this.db.exec("ALTER TABLE downloads ADD COLUMN phase_detail TEXT");
+    }
+    if (!downloadColumns.some((column) => column.name === "game_root")) {
+      this.db.exec("ALTER TABLE downloads ADD COLUMN game_root TEXT");
+    }
+    if (!downloadColumns.some((column) => column.name === "applied_mods")) {
+      this.db.exec("ALTER TABLE downloads ADD COLUMN applied_mods TEXT NOT NULL DEFAULT '[]'");
     }
   }
 
@@ -276,7 +286,8 @@ export class LibraryDatabase {
   listLibrary(runningIds: ReadonlySet<number> = new Set()): InstalledGame[] {
     this.reconcileMissingInstallations();
     const installed = this.db.prepare(`
-      SELECT g.*, d.install_dir AS installDir
+      SELECT g.*, d.install_dir AS installDir,
+        d.game_root AS gameRoot, d.applied_mods AS appliedMods
       FROM downloads d JOIN games g ON g.id=d.game_id
       WHERE d.status='installed'
       ORDER BY g.name COLLATE NOCASE
@@ -286,6 +297,8 @@ export class LibraryDatabase {
       .map((game) => ({
         ...mapGameRow(game),
         installDir: game.installDir as string,
+        gameRoot: game.gameRoot ?? game.installDir as string,
+        appliedModIds: JSON.parse(game.appliedMods ?? "[]") as number[],
         running: runningIds.has(game.id),
       }));
   }
@@ -327,6 +340,8 @@ export class LibraryDatabase {
     url: string;
     runAfter: boolean;
     selectedModIds: number[];
+    gameRoot: string;
+    appliedModIds: number[];
   }) | undefined {
     const row = this.db.prepare(`
       SELECT d.game_id AS gameId, g.name AS gameName, g.thumbnail,
@@ -334,7 +349,8 @@ export class LibraryDatabase {
         d.total_bytes AS totalBytes, d.error, d.install_dir AS installDir,
         d.phase, d.phase_detail AS phaseDetail,
         d.archive_path AS archivePath, d.url, d.run_after AS runAfter,
-        d.selected_mods AS selectedMods
+        d.selected_mods AS selectedMods, d.game_root AS gameRoot,
+        d.applied_mods AS appliedMods
       FROM downloads d JOIN games g ON g.id=d.game_id
       WHERE d.game_id=?
     `).get(gameId) as (Download & {
@@ -342,6 +358,8 @@ export class LibraryDatabase {
       url: string;
       runAfter: number;
       selectedMods: string;
+      gameRoot: string | null;
+      appliedMods: string;
       phase: DownloadPhase | null;
       phaseDetail: string | null;
     }) | undefined;
@@ -349,6 +367,8 @@ export class LibraryDatabase {
       ...row,
       runAfter: row.runAfter === 1,
       selectedModIds: JSON.parse(row.selectedMods) as number[],
+      gameRoot: row.gameRoot ?? row.installDir,
+      appliedModIds: JSON.parse(row.appliedMods) as number[],
       phase: row.phase as DownloadPhase | null,
       phaseDetail: row.phaseDetail,
     } : undefined;
@@ -360,8 +380,10 @@ export class LibraryDatabase {
     status: DownloadStatus;
     archivePath: string;
     installDir: string;
+    gameRoot?: string;
     runAfter: boolean;
     selectedModIds?: number[];
+    appliedModIds?: number[];
     bytesDownloaded?: number;
     totalBytes?: number | null;
     error?: string | null;
@@ -370,8 +392,8 @@ export class LibraryDatabase {
   }): void {
     this.db.prepare(`
       INSERT INTO downloads
-        (game_id,url,status,bytes_downloaded,total_bytes,phase,phase_detail,archive_path,install_dir,run_after,selected_mods,error,updated_at)
-      VALUES (@gameId,@url,@status,@bytesDownloaded,@totalBytes,@phase,@phaseDetail,@archivePath,@installDir,@runAfter,@selectedMods,@error,CURRENT_TIMESTAMP)
+        (game_id,url,status,bytes_downloaded,total_bytes,phase,phase_detail,archive_path,install_dir,game_root,run_after,selected_mods,applied_mods,error,updated_at)
+      VALUES (@gameId,@url,@status,@bytesDownloaded,@totalBytes,@phase,@phaseDetail,@archivePath,@installDir,@gameRoot,@runAfter,@selectedMods,@appliedMods,@error,CURRENT_TIMESTAMP)
       ON CONFLICT(game_id) DO UPDATE SET
         url=excluded.url,
         status=excluded.status,
@@ -381,8 +403,10 @@ export class LibraryDatabase {
         phase_detail=excluded.phase_detail,
         archive_path=excluded.archive_path,
         install_dir=excluded.install_dir,
+        game_root=excluded.game_root,
         run_after=excluded.run_after,
         selected_mods=excluded.selected_mods,
+        applied_mods=excluded.applied_mods,
         error=excluded.error,
         updated_at=CURRENT_TIMESTAMP
     `).run({
@@ -391,15 +415,18 @@ export class LibraryDatabase {
       totalBytes: download.totalBytes ?? null,
       phase: download.phase ?? null,
       phaseDetail: download.phaseDetail ?? null,
+      gameRoot: download.gameRoot ?? download.installDir,
       runAfter: download.runAfter ? 1 : 0,
       selectedMods: JSON.stringify(download.selectedModIds ?? []),
+      appliedMods: JSON.stringify(download.appliedModIds ?? []),
       error: download.error ?? null,
     });
   }
 
   updateDownload(
     gameId: number,
-    patch: Partial<Pick<Download, "status" | "bytesDownloaded" | "totalBytes" | "error" | "phase" | "phaseDetail">>,
+    patch: Partial<Pick<Download, "status" | "bytesDownloaded" | "totalBytes" | "error" | "phase" | "phaseDetail">> &
+      Partial<Pick<InstalledGame, "gameRoot" | "appliedModIds">>,
   ): void {
     const current = this.getDownload(gameId);
     if (!current) throw new Error("Download not found.");
