@@ -1,19 +1,48 @@
 import Database from "better-sqlite3";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import path from "node:path";
 import type { Download, DownloadStatus, Game, GameMod, InstalledGame } from "../../src/shared/types";
 
-interface CatalogGame {
+export interface CatalogEntry {
+  id: string;
   name: string;
-  thumbnail?: string;
-  download_links?: Record<string, string>;
-  mods?: GameMod[];
+  thumbnail: string;
+  sizeBytes: number | null;
+  lastUpdated: string | null;
+  tags: string[];
+  description: string;
+  releaseDate: string | null;
+  detailsLastUpdated: string | null;
+  developerLinks: Record<string, string>;
+  version: string | null;
+  operatingSystems: string[];
+  downloadLinks: Record<string, string>;
+  mods: GameMod[];
+}
+
+interface GameDatabaseRow {
+  id: number;
+  supabase_id: string | null;
+  name: string;
+  thumbnail: string;
+  size_bytes: number | null;
+  last_updated: string | null;
+  tags: string;
+  description: string;
+  release_date: string | null;
+  details_last_updated: string | null;
+  developer_links: string;
+  version: string | null;
+  operating_systems: string;
+  download_links: string;
+  mods: string;
+  installDir?: string | null;
 }
 
 export class LibraryDatabase {
   private readonly db: Database.Database;
 
-  constructor(databasePath: string, catalogPath?: string) {
+  constructor(databasePath: string) {
     if (databasePath !== ":memory:") mkdirSync(path.dirname(databasePath), { recursive: true });
     this.db = new Database(databasePath);
     this.db.pragma("foreign_keys = ON");
@@ -21,10 +50,21 @@ export class LibraryDatabase {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS games (
         id INTEGER PRIMARY KEY,
+        supabase_id TEXT,
         name TEXT NOT NULL UNIQUE,
         thumbnail TEXT NOT NULL DEFAULT '',
+        size_bytes INTEGER,
+        last_updated TEXT,
+        tags TEXT NOT NULL DEFAULT '[]',
+        description TEXT NOT NULL DEFAULT '',
+        release_date TEXT,
+        details_last_updated TEXT,
+        developer_links TEXT NOT NULL DEFAULT '{}',
+        version TEXT,
+        operating_systems TEXT NOT NULL DEFAULT '[]',
         download_links TEXT NOT NULL DEFAULT '{}',
-        mods TEXT NOT NULL DEFAULT '[]'
+        mods TEXT NOT NULL DEFAULT '[]',
+        catalog_available INTEGER NOT NULL DEFAULT 1
       );
       CREATE TABLE IF NOT EXISTS downloads (
         game_id INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
@@ -39,6 +79,15 @@ export class LibraryDatabase {
         error TEXT,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS catalog_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `);
+    this.addMissingGameColumns();
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS games_supabase_id_idx
+      ON games(supabase_id) WHERE supabase_id IS NOT NULL;
     `);
     const downloadColumns = this.db.prepare("PRAGMA table_info(downloads)").all() as Array<{ name: string }>;
     if (!downloadColumns.some((column) => column.name === "url")) {
@@ -47,26 +96,47 @@ export class LibraryDatabase {
     if (!downloadColumns.some((column) => column.name === "selected_mods")) {
       this.db.exec("ALTER TABLE downloads ADD COLUMN selected_mods TEXT NOT NULL DEFAULT '[]'");
     }
-    if (catalogPath) this.seed(readFileSync(catalogPath, "utf8"));
+  }
+
+  private addMissingGameColumns(): void {
+    const columns = this.db.prepare("PRAGMA table_info(games)").all() as Array<{ name: string }>;
+    const existing = new Set(columns.map((column) => column.name));
+    const additions: Record<string, string> = {
+      supabase_id: "TEXT",
+      size_bytes: "INTEGER",
+      last_updated: "TEXT",
+      tags: "TEXT NOT NULL DEFAULT '[]'",
+      description: "TEXT NOT NULL DEFAULT ''",
+      release_date: "TEXT",
+      details_last_updated: "TEXT",
+      developer_links: "TEXT NOT NULL DEFAULT '{}'",
+      version: "TEXT",
+      operating_systems: "TEXT NOT NULL DEFAULT '[]'",
+      catalog_available: "INTEGER NOT NULL DEFAULT 1",
+    };
+    for (const [name, definition] of Object.entries(additions)) {
+      if (!existing.has(name)) this.db.exec(`ALTER TABLE games ADD COLUMN ${name} ${definition}`);
+    }
   }
 
   seed(json: string): void {
     const catalog: unknown = JSON.parse(json);
     if (!Array.isArray(catalog)) throw new Error("The game catalog must be a JSON array.");
     const insert = this.db.prepare(`
-      INSERT INTO games (name, thumbnail, download_links, mods)
-      VALUES (@name, @thumbnail, @downloadLinks, @mods)
+      INSERT INTO games (name, thumbnail, download_links, mods, catalog_available)
+      VALUES (@name, @thumbnail, @downloadLinks, @mods, 1)
       ON CONFLICT(name) DO UPDATE SET
         thumbnail=excluded.thumbnail,
         download_links=excluded.download_links,
-        mods=excluded.mods
+        mods=excluded.mods,
+        catalog_available=1
     `);
     const transaction = this.db.transaction((entries: unknown[]) => {
       for (const entry of entries) {
         if (!entry || typeof entry !== "object" || !("name" in entry) || typeof entry.name !== "string" || !entry.name.trim()) {
           throw new Error("Every game in the catalog must have a non-empty name.");
         }
-        const game = entry as CatalogGame;
+        const game = entry as { name: string; thumbnail?: string; download_links?: Record<string, string>; mods?: GameMod[] };
         const links = game.download_links ?? {};
         if (!links || typeof links !== "object" || Array.isArray(links) ||
             Object.values(links).some((url) => typeof url !== "string")) {
@@ -83,31 +153,79 @@ export class LibraryDatabase {
     transaction(catalog);
   }
 
+  syncCatalog(entries: CatalogEntry[], syncedAt = new Date().toISOString()): void {
+    const markUnavailable = this.db.prepare("UPDATE games SET catalog_available=0");
+    const findExisting = this.db.prepare(`
+      SELECT id FROM games
+      WHERE supabase_id=@id OR (supabase_id IS NULL AND name=@name)
+      ORDER BY CASE WHEN supabase_id=@id THEN 0 ELSE 1 END
+      LIMIT 1
+    `);
+    const insert = this.db.prepare(`
+      INSERT INTO games (
+        supabase_id, name, thumbnail, size_bytes, last_updated, tags,
+        description, release_date, details_last_updated, developer_links,
+        version, operating_systems, download_links, mods, catalog_available
+      ) VALUES (
+        @id, @name, @thumbnail, @sizeBytes, @lastUpdated, @tags,
+        @description, @releaseDate, @detailsLastUpdated, @developerLinks,
+        @version, @operatingSystems, @downloadLinks, @mods, 1
+      )
+    `);
+    const update = this.db.prepare(`
+      UPDATE games SET
+        supabase_id=@id, name=@name, thumbnail=@thumbnail, size_bytes=@sizeBytes,
+        last_updated=@lastUpdated, tags=@tags, description=@description,
+        release_date=@releaseDate, details_last_updated=@detailsLastUpdated,
+        developer_links=@developerLinks, version=@version,
+        operating_systems=@operatingSystems, download_links=@downloadLinks,
+        mods=@mods, catalog_available=1
+      WHERE id=@localId
+    `);
+    const transaction = this.db.transaction((games: CatalogEntry[]) => {
+      markUnavailable.run();
+      for (const game of games) {
+        const existing = findExisting.get({ id: game.id, name: game.name }) as { id: number } | undefined;
+        const values = {
+          ...game,
+          tags: JSON.stringify(game.tags),
+          developerLinks: JSON.stringify(game.developerLinks),
+          operatingSystems: JSON.stringify(game.operatingSystems),
+          downloadLinks: JSON.stringify(game.downloadLinks),
+          mods: JSON.stringify(normalizeMods(game.mods, game.name)),
+        };
+        if (existing) update.run({ ...values, localId: existing.id });
+        else insert.run(values);
+      }
+      this.db.prepare(`
+        INSERT INTO catalog_state (key, value) VALUES ('last_synced_at', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+      `).run(syncedAt);
+    });
+    transaction(entries);
+  }
+
+  getCatalogLastSyncedAt(): string | null {
+    const state = this.db.prepare(
+      "SELECT value FROM catalog_state WHERE key='last_synced_at'",
+    ).get() as { value: string } | undefined;
+    return state?.value ?? null;
+  }
+
   listGames(): Game[] {
+    this.reconcileMissingInstallations();
     return this.db.prepare(`
-      SELECT g.id, g.name, g.thumbnail, g.download_links AS downloadLinks,
-        g.mods, d.install_dir AS installDir
+      SELECT g.*, d.install_dir AS installDir
       FROM games g LEFT JOIN downloads d
         ON d.game_id=g.id AND d.status='installed'
+      WHERE g.catalog_available=1
       ORDER BY g.id
-    `).all().map((row) => {
-      const game = row as {
-        id: number; name: string; thumbnail: string;
-        downloadLinks: string; mods: string; installDir: string | null;
-      };
-      return {
-        id: game.id,
-        name: game.name,
-        thumbnail: game.thumbnail,
-        downloadLinks: JSON.parse(game.downloadLinks) as Record<string, string>,
-        mods: JSON.parse(game.mods) as GameMod[],
-        installDir: game.installDir,
-      };
-    });
+    `).all().map((row) => mapGameRow(row as GameDatabaseRow));
   }
 
   getGame(gameId: number): Game | undefined {
-    return this.listGames().find((game) => game.id === gameId);
+    const row = this.db.prepare("SELECT * FROM games WHERE id=?").get(gameId) as GameDatabaseRow | undefined;
+    return row ? mapGameRow(row) : undefined;
   }
 
   listDownloads(): Download[] {
@@ -122,25 +240,45 @@ export class LibraryDatabase {
   }
 
   listLibrary(runningIds: ReadonlySet<number> = new Set()): InstalledGame[] {
+    this.reconcileMissingInstallations();
     const installed = this.db.prepare(`
-      SELECT g.id, g.name, g.thumbnail, g.download_links AS downloadLinks,
-        g.mods, d.install_dir AS installDir
+      SELECT g.*, d.install_dir AS installDir
       FROM downloads d JOIN games g ON g.id=d.game_id
       WHERE d.status='installed'
       ORDER BY g.name COLLATE NOCASE
-    `).all() as Array<Omit<Game, "downloadLinks" | "mods"> & {
-      downloadLinks: string;
-      mods: string;
-      installDir: string | null;
-    }>;
+    `).all() as GameDatabaseRow[];
     return installed
       .filter((game): game is typeof game & { installDir: string } => game.installDir !== null)
       .map((game) => ({
-      ...game,
-      downloadLinks: JSON.parse(game.downloadLinks) as Record<string, string>,
-      mods: JSON.parse(game.mods) as GameMod[],
-      running: runningIds.has(game.id),
+        ...mapGameRow(game),
+        installDir: game.installDir as string,
+        running: runningIds.has(game.id),
       }));
+  }
+
+  removeInstalledGame(gameId: number): void {
+    const result = this.db.prepare(
+      "DELETE FROM downloads WHERE game_id=? AND status='installed'",
+    ).run(gameId);
+    if (result.changes !== 1) throw new Error("Installed game record was not found.");
+  }
+
+  private reconcileMissingInstallations(): void {
+    const installed = this.db.prepare(
+      "SELECT game_id AS gameId, install_dir AS installDir FROM downloads WHERE status='installed'",
+    ).all() as Array<{ gameId: number; installDir: string }>;
+    for (const game of installed) {
+      try {
+        if (!statSync(game.installDir).isDirectory()) this.removeInstalledGame(game.gameId);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ENOTDIR") {
+          this.removeInstalledGame(game.gameId);
+        } else {
+          throw error;
+        }
+      }
+    }
   }
 
   getDownload(gameId: number): (Download & {
@@ -261,8 +399,30 @@ function normalizeMods(value: unknown, gameName: string): GameMod[] {
       name: mod.name,
       download_links: { ...links },
       steps_to_apply: steps.map((step) => ({ ...step })),
+      ...(typeof mod.file_type === "string" ? { file_type: mod.file_type } : {}),
     };
   });
+}
+
+function mapGameRow(row: GameDatabaseRow): Game {
+  return {
+    id: row.id,
+    supabaseId: row.supabase_id,
+    name: row.name,
+    thumbnail: row.thumbnail,
+    sizeBytes: row.size_bytes,
+    lastUpdated: row.last_updated,
+    tags: JSON.parse(row.tags) as string[],
+    description: row.description,
+    releaseDate: row.release_date,
+    detailsLastUpdated: row.details_last_updated,
+    developerLinks: JSON.parse(row.developer_links) as Record<string, string>,
+    version: row.version,
+    operatingSystems: JSON.parse(row.operating_systems) as string[],
+    downloadLinks: JSON.parse(row.download_links) as Record<string, string>,
+    mods: JSON.parse(row.mods) as GameMod[],
+    installDir: row.installDir ?? null,
+  };
 }
 
 export function canTransition(from: DownloadStatus, to: DownloadStatus): boolean {

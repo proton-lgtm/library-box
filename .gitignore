@@ -6,3 +6,5 @@ __pycache__
 out
 release
 references
+.env*
+.temp

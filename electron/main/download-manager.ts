@@ -1,9 +1,8 @@
 import { BrowserWindow, type DownloadItem } from "electron";
-import { createWriteStream, existsSync } from "node:fs";
-import { mkdir, open, rename, rm, stat } from "node:fs/promises";
+import { createWriteStream, existsSync, statSync } from "node:fs";
+import { lstat, mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { once } from "node:events";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import type { DownloadUpdate, GameMod, StartDownloadInput } from "../../src/shared/types";
 import { extractArchive, isSupportedArchive } from "./archive";
 import type { LibraryDatabase } from "./database";
@@ -77,19 +76,44 @@ function isDirectFileMod(mod: GameMod): boolean {
     !mod.steps_to_apply[0].source_folder;
 }
 
-function isArchiveSignature(bytes: Uint8Array): boolean {
-  const zip = bytes[0] === 0x50 && bytes[1] === 0x4b;
-  const sevenZip = bytes.length >= 6 &&
-    [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c].every((byte, index) => bytes[index] === byte);
-  const rar4 = bytes.length >= 7 &&
-    [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00].every((byte, index) => bytes[index] === byte);
-  const rar5 = bytes.length >= 8 &&
-    [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00].every((byte, index) => bytes[index] === byte);
-  return zip || sevenZip || rar4 || rar5;
-}
-
 function safeFileName(value: string): string {
   return value.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/g, "").trim() || "mod";
+}
+
+function archiveExtension(url: URL): string {
+  const extension = path.extname(url.pathname).toLowerCase();
+  return [".zip", ".7z", ".rar"].includes(extension) ? extension : ".zip";
+}
+
+function findExistingGameArchive(installDir: string, preferredPath: string): string | undefined {
+  const candidates = [
+    preferredPath,
+    ...[".zip", ".7z", ".rar"].map((extension) => path.join(installDir, `game${extension}`)),
+  ];
+  return candidates.find((candidate, index) =>
+    candidates.indexOf(candidate) === index &&
+    existsSync(candidate) &&
+    statSync(candidate).isFile(),
+  );
+}
+
+async function archiveHasSupportedSignature(archivePath: string): Promise<boolean> {
+  return (await getArchiveExtension(archivePath)) !== undefined;
+}
+
+async function getArchiveExtension(archivePath: string): Promise<string | undefined> {
+  const signature = new Uint8Array(8);
+  const fileHandle = await open(archivePath, "r");
+  try {
+    await fileHandle.read(signature, 0, signature.length, 0);
+  } finally {
+    await fileHandle.close();
+  }
+  if (signature[0] === 0x50 && signature[1] === 0x4b) return ".zip";
+  if ([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c].every((byte, index) => signature[index] === byte)) return ".7z";
+  if ([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07].every((byte, index) => signature[index] === byte) &&
+      [0x00, 0x01].includes(signature[6])) return ".rar";
+  return undefined;
 }
 
 function finishWriteStream(stream: ReturnType<typeof createWriteStream>): Promise<void> {
@@ -106,6 +130,17 @@ function finishWriteStream(stream: ReturnType<typeof createWriteStream>): Promis
     stream.once("finish", onFinish);
     stream.end();
   });
+}
+
+async function assertRegularDirectory(directory: string): Promise<void> {
+  try {
+    const details = await lstat(directory);
+    if (details.isSymbolicLink() || !details.isDirectory()) {
+      throw new Error("A legacy download folder is not a regular directory.");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 export class DownloadManager {
@@ -142,11 +177,25 @@ export class DownloadManager {
     if (!installDir.startsWith(`${destination}${path.sep}`)) {
       throw new Error("The installation path is outside the selected destination.");
     }
-    if (existsSync(installDir)) throw new Error("The game already exists in this destination.");
-
-    const archiveDir = path.join(destination, ".redline-downloads");
-    await mkdir(archiveDir, { recursive: true });
-    const archivePath = path.join(archiveDir, `${game.id}.archive`);
+    const previous = this.database.getDownload(game.id);
+    if (previous?.status === "installed") throw new Error("The game is already installed.");
+    if (existsSync(installDir)) {
+      const details = await lstat(installDir);
+      if (details.isSymbolicLink() || !details.isDirectory()) {
+        throw new Error("The game folder must be a regular directory.");
+      }
+      const knownFolder = previous && path.resolve(previous.installDir) === installDir;
+      const hasArchive = findExistingGameArchive(installDir, path.join(installDir, `game${archiveExtension(url)}`));
+      if (!knownFolder && !hasArchive) {
+        throw new Error("The game folder already exists and contains no reusable game archive.");
+      }
+    } else {
+      await mkdir(installDir, { recursive: true });
+    }
+    const preferredArchivePath = path.join(installDir, `game${archiveExtension(url)}`);
+    const rootArchive = findExistingGameArchive(installDir, preferredArchivePath);
+    const migratedArchive = await this.migrateLegacyArchives(game.id, installDir, url);
+    const archivePath = rootArchive ?? migratedArchive ?? preferredArchivePath;
     this.database.saveDownload({
       gameId: game.id,
       status: "downloading",
@@ -159,7 +208,9 @@ export class DownloadManager {
     const transfer: Transfer = {};
     this.transfers.set(game.id, transfer);
     this.emit(game.id);
-    if (isBrowserHost(url)) {
+    if (existsSync(archivePath)) {
+      void this.installExistingArchive(game.id, archivePath, transfer);
+    } else if (isBrowserHost(url)) {
       this.startBrowserTransfer(game.id, url, archivePath, transfer);
     } else {
       void this.downloadDirect(game.id, resolveDirectUrl(url), archivePath, transfer);
@@ -190,14 +241,104 @@ export class DownloadManager {
       transfer.item.resume();
       return;
     }
+    transfer.controller = new AbortController();
     const validatedUrl = safeUrl(record.url);
     this.database.updateDownload(gameId, { status: "downloading", error: null });
     this.emit(gameId);
-    if (isBrowserHost(validatedUrl)) {
-      this.startBrowserTransfer(gameId, validatedUrl, record.archivePath, transfer);
-    } else {
-      void this.downloadDirect(gameId, resolveDirectUrl(validatedUrl), record.archivePath, transfer);
+    void this.resumeTransfer(gameId, validatedUrl, transfer);
+  }
+
+  private async resumeTransfer(gameId: number, url: URL, transfer: Transfer): Promise<void> {
+    try {
+      const current = this.database.getDownload(gameId);
+      if (!current) throw new Error("Download record was not found.");
+      const archivePath = await this.migrateLegacyArchives(
+        gameId,
+        path.resolve(current.installDir),
+        url,
+      ) ?? current.archivePath;
+      const updated = this.database.getDownload(gameId);
+      if (!updated) throw new Error("Download record was not found.");
+      if (existsSync(archivePath)) {
+        transfer.controller = undefined;
+        await this.installExistingArchive(gameId, archivePath, transfer);
+      } else if (isBrowserHost(url)) {
+        transfer.controller = undefined;
+        this.startBrowserTransfer(gameId, url, archivePath, transfer);
+      } else {
+        transfer.controller = undefined;
+        void this.downloadDirect(gameId, resolveDirectUrl(url), archivePath, transfer);
+      }
+    } catch (error) {
+      this.fail(gameId, error);
     }
+  }
+
+  private async migrateLegacyArchives(
+    gameId: number,
+    installDir: string,
+    url: URL,
+  ): Promise<string | undefined> {
+    const record = this.database.getDownload(gameId);
+    if (!record) return undefined;
+    const legacyDirectory = path.join(path.dirname(installDir), ".redline-downloads");
+    const legacyArchive = path.join(legacyDirectory, `${gameId}.archive`);
+    if (path.resolve(record.archivePath) !== legacyArchive) return undefined;
+
+    await assertRegularDirectory(legacyDirectory);
+    await mkdir(installDir, { recursive: true });
+    const preferredPath = path.join(installDir, `game${archiveExtension(url)}`);
+    let archivePath = findExistingGameArchive(installDir, preferredPath);
+    if (!archivePath && existsSync(legacyArchive)) {
+      const details = await lstat(legacyArchive);
+      if (details.isSymbolicLink() || !details.isFile()) {
+        throw new Error("The existing game archive is not a regular file.");
+      }
+      const extension = await getArchiveExtension(legacyArchive);
+      if (!extension) throw new Error("The existing game archive is invalid.");
+      archivePath = path.join(installDir, `game${extension}`);
+      await rename(legacyArchive, archivePath);
+    }
+
+    const legacyPartial = `${legacyArchive}.part`;
+    if (!archivePath && existsSync(legacyPartial)) {
+      const details = await lstat(legacyPartial);
+      if (details.isSymbolicLink() || !details.isFile()) {
+        throw new Error("The partial game archive is not a regular file.");
+      }
+      archivePath = preferredPath;
+      await rename(legacyPartial, `${archivePath}.part`);
+    }
+
+    const game = this.database.getGame(gameId);
+    for (const modId of record.selectedModIds) {
+      const mod = game?.mods[modId];
+      const modUrl = mod && preferredModUrl(mod);
+      if (!mod || !modUrl) continue;
+      const extension = path.extname(new URL(modUrl).pathname).toLowerCase() ||
+        (isDirectFileMod(mod) ? ".bin" : ".zip");
+      const legacyMod = path.join(legacyDirectory, "mods", `${safeFileName(mod.name)}${extension}`);
+      const rootMod = path.join(installDir, `${safeFileName(mod.name)}${extension}`);
+      if (existsSync(legacyMod) && !existsSync(rootMod)) {
+        await assertRegularDirectory(path.dirname(legacyMod));
+        const details = await lstat(legacyMod);
+        if (details.isSymbolicLink() || !details.isFile()) {
+          throw new Error("A legacy mod archive is not a regular file.");
+        }
+        await rename(legacyMod, rootMod);
+      }
+    }
+
+    archivePath ??= preferredPath;
+    await rm(legacyArchive, { force: true });
+    await rm(legacyPartial, { force: true });
+    this.database.saveDownload({
+      ...record,
+      installDir,
+      archivePath,
+      selectedModIds: record.selectedModIds,
+    });
+    return archivePath;
   }
 
   cancel(gameId: number): void {
@@ -229,6 +370,21 @@ export class DownloadManager {
       error: record.error,
     };
     for (const listener of this.listeners) listener(update);
+  }
+
+  private async installExistingArchive(
+    gameId: number,
+    archivePath: string,
+    transfer: Transfer,
+  ): Promise<void> {
+    try {
+      if (!await archiveHasSupportedSignature(archivePath)) {
+        throw new Error("The existing game archive is invalid.");
+      }
+      await this.finishInstall(gameId, archivePath, transfer);
+    } catch (error) {
+      this.fail(gameId, error);
+    }
   }
 
   private async downloadDirect(
@@ -303,14 +459,9 @@ export class DownloadManager {
         reader.releaseLock();
       }
       transfer.controller = undefined;
-      const signature = new Uint8Array(8);
-      const fileHandle = await open(partPath, "r");
-      try {
-        await fileHandle.read(signature, 0, signature.length, 0);
-      } finally {
-        await fileHandle.close();
+      if (!await archiveHasSupportedSignature(partPath)) {
+        throw new Error("Downloaded file is not a ZIP, 7z, or RAR archive.");
       }
-      if (!isArchiveSignature(signature)) throw new Error("Downloaded file is not a ZIP, 7z, or RAR archive.");
       await rm(archivePath, { force: true });
       await rename(partPath, archivePath);
       await this.finishInstall(gameId, archivePath, transfer);
@@ -415,55 +566,46 @@ export class DownloadManager {
     const record = this.database.getDownload(gameId);
     const game = this.database.getGame(gameId);
     if (!record || !game) throw new Error("Game disappeared while installing.");
-    const staging = `${record.installDir}.extracting-${randomUUID()}`;
-    await mkdir(staging, { recursive: true });
-    try {
-      await extractArchive(archivePath, staging);
-      for (const modId of record.selectedModIds) {
-        const downloadState = this.database.getDownload(gameId);
-        if (!downloadState || downloadState.status === "cancelled") {
-          throw new Error("Installation was cancelled.");
-        }
-        const mod = game.mods[modId];
-        if (!mod) throw new Error(`Selected mod ${modId + 1} is no longer in the catalog.`);
-        const url = preferredModUrl(mod);
-        if (!url) throw new Error(`No download link is configured for mod "${mod.name}".`);
-        const modArchive = await this.downloadMod(
-          gameId,
-          mod,
-          safeUrl(url),
-          path.dirname(record.archivePath),
-          transfer,
-        );
-        await applyModArchive(modArchive, mod, staging, isDirectFileMod(mod));
-      }
-      const launcher = await findGameLauncher(staging);
-      if (!launcher) throw new Error("No compatible game launcher was found in the archive.");
-      const current = this.database.getDownload(gameId);
-      if (!current || current.status === "cancelled") {
+    await mkdir(record.installDir, { recursive: true });
+    await extractArchive(archivePath, record.installDir);
+    for (const modId of record.selectedModIds) {
+      const downloadState = this.database.getDownload(gameId);
+      if (!downloadState || downloadState.status === "cancelled") {
         throw new Error("Installation was cancelled.");
       }
-      if (existsSync(record.installDir)) throw new Error("The installation destination already exists.");
-      await rename(staging, record.installDir);
-      this.database.updateDownload(gameId, { status: "installed", error: null });
-      this.transfers.delete(gameId);
-      this.emit(gameId);
-      if (record.runAfter) {
-        try {
-          await this.launcher.launch(gameId);
-        } catch (error) {
-          this.database.updateDownload(gameId, {
-            error: `Installed, but could not auto-run: ${error instanceof Error ? error.message : String(error)}`,
-          });
-          this.emit(gameId);
-        }
-      }
-      this.transfers.delete(gameId);
-
-    } catch (error) {
-      await rm(staging, { recursive: true, force: true });
-      throw error;
+      const mod = game.mods[modId];
+      if (!mod) throw new Error(`Selected mod ${modId + 1} is no longer in the catalog.`);
+      const url = preferredModUrl(mod);
+      if (!url) throw new Error(`No download link is configured for mod "${mod.name}".`);
+      const modArchive = await this.downloadMod(
+        gameId,
+        mod,
+        safeUrl(url),
+        record.installDir,
+        transfer,
+      );
+      await applyModArchive(modArchive, mod, record.installDir, isDirectFileMod(mod));
     }
+    const launcher = await findGameLauncher(record.installDir);
+    if (!launcher) throw new Error("No compatible game launcher was found in the archive.");
+    const current = this.database.getDownload(gameId);
+    if (!current || current.status === "cancelled") {
+      throw new Error("Installation was cancelled.");
+    }
+    this.database.updateDownload(gameId, { status: "installed", error: null });
+    this.transfers.delete(gameId);
+    this.emit(gameId);
+    if (record.runAfter) {
+      try {
+        await this.launcher.launch(gameId);
+      } catch (error) {
+        this.database.updateDownload(gameId, {
+          error: `Installed, but could not auto-run: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        this.emit(gameId);
+      }
+    }
+    this.transfers.delete(gameId);
   }
 
   private async downloadMod(
@@ -476,10 +618,15 @@ export class DownloadManager {
     const extension = path.extname(initialUrl.pathname).toLowerCase();
     const directFile = isDirectFileMod(mod);
     const fileExtension = extension || (directFile ? ".bin" : ".zip");
-    const modDirectory = path.join(archiveDirectory, "mods");
-    await mkdir(modDirectory, { recursive: true });
-    const modArchive = path.join(modDirectory, `${safeFileName(mod.name)}${fileExtension}`);
+    await mkdir(archiveDirectory, { recursive: true });
+    const modArchive = path.join(archiveDirectory, `${safeFileName(mod.name)}${fileExtension}`);
     const partPath = `${modArchive}.part`;
+    if (existsSync(modArchive)) {
+      if (!directFile && !await archiveHasSupportedSignature(modArchive)) {
+        throw new Error(`The existing mod archive for "${mod.name}" is invalid.`);
+      }
+      return modArchive;
+    }
     await rm(partPath, { force: true });
     this.database.updateDownload(gameId, {
       status: "downloading",
@@ -539,14 +686,7 @@ export class DownloadManager {
       }
       transfer.controller = undefined;
       if (!directFile && isSupportedArchive(modArchive)) {
-        const signature = new Uint8Array(8);
-        const fileHandle = await open(partPath, "r");
-        try {
-          await fileHandle.read(signature, 0, signature.length, 0);
-        } finally {
-          await fileHandle.close();
-        }
-        if (!isArchiveSignature(signature)) {
+        if (!await archiveHasSupportedSignature(partPath)) {
           throw new Error(`Downloaded mod "${mod.name}" is not a valid archive.`);
         }
       }
@@ -615,15 +755,8 @@ export class DownloadManager {
             return;
           }
           void (async () => {
-            if (isSupportedArchive(modArchive)) {
-              const signature = new Uint8Array(8);
-              const fileHandle = await open(partPath, "r");
-              try {
-                await fileHandle.read(signature, 0, signature.length, 0);
-              } finally {
-                await fileHandle.close();
-              }
-              if (!isArchiveSignature(signature)) throw new Error("Downloaded mod is not a valid archive.");
+            if (isSupportedArchive(modArchive) && !await archiveHasSupportedSignature(partPath)) {
+              throw new Error("Downloaded mod is not a valid archive.");
             }
             await rename(partPath, modArchive);
             finish();

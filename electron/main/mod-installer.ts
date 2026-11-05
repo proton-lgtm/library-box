@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, readdir, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, rm, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { extractArchive, isSupportedArchive } from "./archive";
 import type { GameMod } from "../../src/shared/types";
@@ -45,7 +45,7 @@ async function mergeMove(source: string, destination: string): Promise<void> {
       for (const child of await readdir(source)) {
         await mergeMove(path.join(source, child), path.join(destination, child));
       }
-      await rm(source, { recursive: false });
+      await rmdir(source);
       return;
     }
   }

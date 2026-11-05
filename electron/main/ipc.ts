@@ -1,10 +1,13 @@
-import { BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from "electron";
+import { BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from "electron";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { DownloadManager } from "./download-manager";
 import type { LibraryDatabase } from "./database";
+import type { LibraryManager } from "./library-manager";
 import type { Launcher } from "./launcher";
+import type { SupabaseService } from "./supabase-service";
+import { authCredentialsSchema, externalUrlSchema } from "./ipc-validation";
 
 const gameIdSchema = z.number().int().positive();
 const startDownloadSchema = z.object({
@@ -14,7 +17,6 @@ const startDownloadSchema = z.object({
   runAfter: z.boolean(),
   selectedModIds: z.array(z.number().int().nonnegative()).max(100),
 }).strict();
-
 function assertTrustedSender(senderUrl: string, trustedUrl: string): void {
   if (new URL(senderUrl).href === new URL(trustedUrl).href) return;
   throw new Error("Untrusted IPC sender.");
@@ -25,6 +27,8 @@ export function registerIpc(
   database: LibraryDatabase,
   downloads: DownloadManager,
   launcher: Launcher,
+  library: LibraryManager,
+  supabase: SupabaseService,
   trustedRendererUrl: string,
 ): void {
   const handle = (channel: string, handler: (...args: unknown[]) => unknown) => {
@@ -36,6 +40,15 @@ export function registerIpc(
     });
   };
   handle("library:list-games", () => database.listGames());
+  handle("library:refresh-catalog", () => supabase.refreshCatalog());
+  handle("library:get-auth-state", () => supabase.getAuthState());
+  handle("library:sign-in", (input) => supabase.signIn(authCredentialsSchema.parse(input)));
+  handle("library:upgrade-account", (input) => supabase.upgradeAnonymousAccount(authCredentialsSchema.parse(input)));
+  handle("library:sign-out", () => supabase.signOut());
+  handle("library:open-external", async (input) => {
+    const url = externalUrlSchema.parse(input);
+    await shell.openExternal(url);
+  });
   handle("library:list-downloads", () => database.listDownloads());
   handle("library:list-library", () => database.listLibrary(launcher.runningIds()));
   handle("library:choose-destination", async () => {
@@ -63,6 +76,29 @@ export function registerIpc(
   handle("library:cancel-download", (gameId) => downloads.cancel(gameIdSchema.parse(gameId)));
   handle("library:launch-game", (gameId) => launcher.launch(gameIdSchema.parse(gameId)));
   handle("library:stop-game", (gameId) => launcher.stop(gameIdSchema.parse(gameId)));
+  handle("library:delete-game", (gameId) => library.deleteGame(gameIdSchema.parse(gameId)));
+  handle("library:minimize-window", () => {
+    const window = getWindow();
+    if (!window || window.isDestroyed()) throw new Error("The app window is unavailable.");
+    window.minimize();
+  });
+  handle("library:toggle-maximize-window", () => {
+    const window = getWindow();
+    if (!window || window.isDestroyed()) throw new Error("The app window is unavailable.");
+    if (window.isMaximized()) window.unmaximize();
+    else window.maximize();
+    return window.isMaximized();
+  });
+  handle("library:is-window-maximized", () => {
+    const window = getWindow();
+    if (!window || window.isDestroyed()) throw new Error("The app window is unavailable.");
+    return window.isMaximized();
+  });
+  handle("library:close-window", () => {
+    const window = getWindow();
+    if (!window || window.isDestroyed()) throw new Error("The app window is unavailable.");
+    window.close();
+  });
 
   downloads.onUpdate((update) => {
     const currentWindow = getWindow();

@@ -15,15 +15,44 @@ export interface GameMod {
   name: string;
   download_links: Record<string, string>;
   steps_to_apply: ModStep[];
+  file_type?: string;
 }
 
 export interface Game {
   id: number;
+  supabaseId?: string | null;
   name: string;
   thumbnail: string;
+  sizeBytes?: number | null;
+  lastUpdated?: string | null;
+  tags?: string[];
+  description?: string;
+  releaseDate?: string | null;
+  detailsLastUpdated?: string | null;
+  developerLinks?: Record<string, string>;
+  version?: string | null;
+  operatingSystems?: string[];
   downloadLinks: Record<string, string>;
   mods: GameMod[];
   installDir: string | null;
+}
+
+export interface CatalogSnapshot {
+  games: Game[];
+  stale: boolean;
+  lastSyncedAt: string | null;
+  error: string | null;
+}
+
+export interface AuthState {
+  status: "anonymous" | "account" | "unavailable";
+  email: string | null;
+  message: string | null;
+}
+
+export interface AuthCredentials {
+  email: string;
+  password: string;
 }
 
 export interface Download {
@@ -60,6 +89,12 @@ export interface StartDownloadInput {
 
 export interface DesktopApi {
   listGames(): Promise<Game[]>;
+  refreshCatalog(): Promise<CatalogSnapshot>;
+  getAuthState(): Promise<AuthState>;
+  signIn(credentials: AuthCredentials): Promise<AuthState>;
+  upgradeAnonymousAccount(credentials: AuthCredentials): Promise<AuthState>;
+  signOut(): Promise<AuthState>;
+  openExternal(url: string): Promise<void>;
   listDownloads(): Promise<Download[]>;
   listLibrary(): Promise<InstalledGame[]>;
   chooseDestination(): Promise<string | null>;
@@ -69,5 +104,11 @@ export interface DesktopApi {
   cancelDownload(gameId: number): Promise<void>;
   launchGame(gameId: number): Promise<void>;
   stopGame(gameId: number): Promise<void>;
+  deleteGame(gameId: number): Promise<void>;
+  minimizeWindow(): Promise<void>;
+  toggleMaximizeWindow(): Promise<boolean>;
+  isWindowMaximized(): Promise<boolean>;
+  closeWindow(): Promise<void>;
   onDownloadUpdate(callback: (update: DownloadUpdate) => void): () => void;
+  onWindowMaximized(callback: (maximized: boolean) => void): () => void;
 }

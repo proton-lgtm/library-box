@@ -1,6 +1,6 @@
-# Redline Library
+# Game Library
 
-Redline Library is a cross-platform desktop game library built with Electron, React, TypeScript, and Vite. Its local SQLite catalog is seeded from [`py_box/games.json`](./py_box/games.json); the Python CLI in `py_box/` remains available independently.
+A cross-platform desktop game library built with Electron, React, TypeScript, and Vite. Supabase is the source of truth for the public game catalog and authentication. SQLite caches catalog data for offline browsing and stores device-local download/install state. The Python CLI in `py_box/` remains available independently.
 
 The interface follows the supplied game-store references: deep navy surfaces, violet accents, subtle halftone texture, rounded artwork panels, and a compact collection sidebar. It uses the Inter variable font bundled locally with the app, so typography is consistent offline and across platforms.
 
@@ -17,7 +17,7 @@ The interface follows the supplied game-store references: deep navy surfaces, vi
 
 ## Development
 
-Install Node.js 20.19+ (or 22.12+) and the platform's native build prerequisites for `better-sqlite3`, then run:
+Install Node.js 20.19+ (or 22.12+) and the platform's native build prerequisites for `better-sqlite3`. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` in the ignored `.env.local` file, then run:
 
 ```powershell
 npm install
@@ -52,10 +52,16 @@ Build native packages on their target operating system for the most reliable res
 
 ## Using the library
 
-Home shows the games imported from `py_box/games.json`. Selecting a cover opens its details and the download flow. Choose an existing destination folder, optionally select catalog mods, and optionally enable auto-run after installation. Selected mods download after the base game, then their configured extract/move steps are applied to the staged install before it is added to the library. Downloads are available from the left navigation and support pause, resume, and cancel. GoFile and Workupload links open in a dedicated browser window so the user can complete any host-page interaction. Other configured HTTPS links are downloaded directly. The Library page lists installed games and lets the user launch or stop them.
+Home shows the games fetched from Supabase; the last cached catalog remains available when the service is offline. Selecting a cover opens details and the download flow. Choose an existing destination folder, optionally select catalog mods, and optionally enable auto-run after installation. The game archive and selected mod files are kept in the game folder alongside extracted files. When retrying an install, existing game and mod archives are reused rather than downloaded again. Downloads are available from the left navigation and support pause, resume, and cancel. GoFile and Workupload links open in a dedicated browser window so the user can complete any host-page interaction. Other configured HTTPS links are downloaded directly. The Library page lists installed games and lets the user launch, stop, or delete them. Deletion removes the installed folder, including its kept archives. Missing install folders are reconciled during refresh and removed from the library.
 
-ZIP, 7z, and RAR archives are extracted with the bundled 7-Zip executable. Archive paths and links are checked before extraction, and installation is promoted from a staging directory only after a compatible launcher is found. Launcher processes are started without a shell.
+### Supabase setup
+
+Run [`supabase/migrations/20261105000000_catalog.sql`](./supabase/migrations/20261105000000_catalog.sql) in the Supabase SQL editor, then manually populate `games` and its matching `game_details` row. Link objects use JSON objects; `mod_links` is an array of the existing mod objects, including `steps_to_apply`.
+
+In Supabase Auth, enable new users and anonymous sign-ins, keep email confirmation disabled to avoid requiring email verification, and enable manual identity linking so an anonymous user can be upgraded without changing their user ID. The desktop app uses only the publishable key and read-only catalog access; never put a service-role key in the app or `.env.local`.
+
+ZIP, 7z, and RAR archives are extracted with the bundled 7-Zip executable. Archive paths and links are checked before extraction. Launcher processes are started without a shell.
 
 ## Security notes
 
-Electron windows use context isolation, sandboxing, and disabled Node integration. The preload exposes only the library operations needed by the UI. IPC validates payloads, download URLs are checked against the selected game's catalog links, network URLs and redirects must use HTTPS and cannot target localhost, and the download destination must be an existing folder. SQLite data is stored in Electron's per-user application data directory.
+Electron windows use context isolation, sandboxing, and disabled Node integration. The preload exposes only the library operations needed by the UI. IPC validates payloads, download URLs are checked against the selected game's catalog links, external links and network redirects must use HTTPS and cannot target localhost, and the download destination must be an existing folder. SQLite data and encrypted auth session data are stored in Electron's per-user application data directory.

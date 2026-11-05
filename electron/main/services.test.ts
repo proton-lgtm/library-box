@@ -1,14 +1,16 @@
 import { EventEmitter } from "node:events";
 import { execFileSync, type ChildProcess } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { path7za } from "7zip-bin";
 import { validateArchivePaths, extractArchive } from "./archive";
 import { canTransition, LibraryDatabase } from "./database";
 import { DownloadManager } from "./download-manager";
 import { Launcher } from "./launcher";
+import { LibraryManager } from "./library-manager";
 import { applyModArchive } from "./mod-installer";
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -67,6 +69,104 @@ describe("SQLite library", () => {
     database.close();
   });
 
+  it("syncs remote metadata by UUID without losing local download records", () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    mkdirSync(installDir);
+    const database = makeDatabase();
+    const localId = database.listGames()[0].id;
+    database.saveDownload({
+      gameId: localId,
+      url: "https://downloads.example/game.zip",
+      status: "installed",
+      archivePath: path.join(installDir, "game.zip"),
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+
+    database.syncCatalog([{
+      id: "69e2af3e-4128-4e15-95a0-b90e33ae11cd",
+      name: "Sample Game",
+      thumbnail: "https://covers.example/game.webp",
+      sizeBytes: 1024,
+      lastUpdated: "2026-11-01T00:00:00.000Z",
+      tags: ["visual novel", "demo"],
+      description: "A game description.",
+      releaseDate: "2026-10-25",
+      detailsLastUpdated: "2026-11-02T00:00:00.000Z",
+      developerLinks: { website: "https://developer.example" },
+      version: "1.2.0",
+      operatingSystems: ["Windows", "Linux"],
+      downloadLinks: { pixeldrain: "https://pixeldrain.com/u/example" },
+      mods: [],
+    }]);
+
+    expect(database.listGames()[0]).toMatchObject({
+      id: localId,
+      supabaseId: "69e2af3e-4128-4e15-95a0-b90e33ae11cd",
+      sizeBytes: 1024,
+      tags: ["visual novel", "demo"],
+      description: "A game description.",
+      developerLinks: { website: "https://developer.example" },
+      operatingSystems: ["Windows", "Linux"],
+    });
+    expect(database.getDownload(localId)?.status).toBe("installed");
+    expect(database.getCatalogLastSyncedAt()).toBeTruthy();
+
+    database.syncCatalog([]);
+    expect(database.listGames()).toEqual([]);
+    expect(database.listLibrary()).toHaveLength(1);
+    expect(database.getDownload(localId)?.status).toBe("installed");
+    database.close();
+  });
+
+  it("adds catalog cache columns to an existing local database without dropping installs", () => {
+    const root = makeTempDirectory();
+    const databasePath = path.join(root, "library.sqlite");
+    const installDir = path.join(root, "Sample Game");
+    mkdirSync(installDir);
+    const legacy = new Database(databasePath);
+    legacy.exec(`
+      CREATE TABLE games (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        thumbnail TEXT NOT NULL DEFAULT '',
+        download_links TEXT NOT NULL DEFAULT '{}',
+        mods TEXT NOT NULL DEFAULT '[]'
+      );
+      CREATE TABLE downloads (
+        game_id INTEGER PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
+        url TEXT NOT NULL,
+        status TEXT NOT NULL,
+        bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+        total_bytes INTEGER,
+        archive_path TEXT NOT NULL,
+        install_dir TEXT NOT NULL,
+        run_after INTEGER NOT NULL DEFAULT 0,
+        selected_mods TEXT NOT NULL DEFAULT '[]',
+        error TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO games (id,name) VALUES (17,'Sample Game');
+      INSERT INTO downloads (game_id,url,status,archive_path,install_dir)
+      VALUES (17,'https://downloads.example/game.zip','installed',
+        '${path.join(installDir, "game.zip").replace(/'/g, "''")}',
+        '${installDir.replace(/'/g, "''")}');
+    `);
+    legacy.close();
+
+    const migrated = new LibraryDatabase(databasePath);
+    expect(migrated.listGames()[0]).toMatchObject({
+      id: 17,
+      name: "Sample Game",
+      tags: [],
+      developerLinks: {},
+    });
+    expect(migrated.listLibrary()).toHaveLength(1);
+    migrated.close();
+  });
+
   it("validates download state transitions", () => {
     expect(canTransition("downloading", "paused")).toBe(true);
     expect(canTransition("paused", "downloading")).toBe(true);
@@ -87,12 +187,97 @@ describe("SQLite library", () => {
     expect(() => database.updateDownload(1, { status: "paused" })).toThrow(/transition/);
     database.close();
   });
+
+  it("removes installed records when their folders are deleted outside the app", () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    mkdirSync(installDir);
+    const database = makeDatabase();
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "installed",
+      archivePath: path.join(installDir, "game.zip"),
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+
+    rmSync(installDir, { recursive: true });
+
+    expect(database.listLibrary()).toEqual([]);
+    expect(database.listGames()[0].installDir).toBeNull();
+    expect(database.getDownload(1)).toBeUndefined();
+    database.close();
+  });
+
+  it("deletes an installed game folder and removes it from the library", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    const archivePath = path.join(installDir, "game.zip");
+    mkdirSync(installDir);
+    writeFileSync(path.join(installDir, "game.exe"), "game");
+    writeFileSync(archivePath, "archive");
+    writeFileSync(`${archivePath}.part`, "partial");
+    const database = makeDatabase();
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "installed",
+      archivePath,
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    const launcher = new Launcher(database);
+    const library = new LibraryManager(database, launcher);
+
+    await library.deleteGame(1);
+
+    expect(existsSync(installDir)).toBe(false);
+    expect(existsSync(archivePath)).toBe(false);
+    expect(database.listLibrary()).toEqual([]);
+    expect(database.listGames()[0].installDir).toBeNull();
+    database.close();
+  });
+
+  it("refuses to delete an installed path that does not match the game folder", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "unrelated");
+    mkdirSync(installDir);
+    const database = makeDatabase();
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "installed",
+      archivePath: path.join(installDir, "game.zip"),
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    const library = new LibraryManager(database, new Launcher(database));
+
+    await expect(library.deleteGame(1)).rejects.toThrow(/safe installation path/);
+    expect(existsSync(installDir)).toBe(true);
+    database.close();
+  });
 });
 
 describe("download controls", () => {
   it("pauses, resumes, and cancels an active direct download", async () => {
     const database = makeDatabase();
     const directory = makeTempDirectory();
+    const installDir = path.join(directory, "Sample Game");
+    mkdirSync(installDir);
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "downloading",
+      archivePath: path.join(installDir, "game.zip"),
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
     const launcher = new Launcher(database);
     const manager = new DownloadManager(database, launcher);
     const requests: Array<AbortSignal | undefined> = [];
@@ -182,10 +367,137 @@ describe("download controls", () => {
       selectedModIds: [0, 1],
     });
     await vi.waitFor(() => expect(database.getDownload(1)).toMatchObject({ status: "installed" }));
-    const installedPatch = path.join(root, "Modded Game", "game", "patch.rpy");
+    const installedRoot = path.join(root, "Modded Game");
+    const installedPatch = path.join(installedRoot, "game", "patch.rpy");
     expect(await import("node:fs/promises").then(({ readFile }) => readFile(installedPatch, "utf8"))).toBe("patched");
-    const installedDirectMod = path.join(root, "Modded Game", "mods", "Direct Fix.dll");
+    const installedDirectMod = path.join(installedRoot, "mods", "Direct Fix.dll");
     expect(await import("node:fs/promises").then(({ readFile }) => readFile(installedDirectMod, "utf8"))).toBe("direct mod contents");
+    expect(existsSync(path.join(installedRoot, "game.zip"))).toBe(true);
+    expect(existsSync(path.join(installedRoot, "Patch.zip"))).toBe(true);
+    expect(existsSync(path.join(installedRoot, "Direct Fix.dll"))).toBe(true);
+    expect(existsSync(path.join(root, ".redline-downloads"))).toBe(false);
+    database.close();
+  });
+
+  it("reuses an existing game archive in the game root without downloading it again", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    const source = path.join(root, "source");
+    const modSource = path.join(root, "mod-source");
+    mkdirSync(installDir);
+    mkdirSync(source);
+    mkdirSync(path.join(modSource, "patch", "game"), { recursive: true });
+    writeFileSync(path.join(source, "game.exe"), "launcher");
+    writeFileSync(path.join(modSource, "patch", "game", "patch.rpy"), "reused mod");
+    const archivePath = path.join(installDir, "game.zip");
+    const modArchivePath = path.join(installDir, "Patch.zip");
+    execFileSync(path7za, ["a", archivePath, "game.exe"], {
+      cwd: source,
+      windowsHide: true,
+    });
+    execFileSync(path7za, ["a", modArchivePath, "patch"], {
+      cwd: modSource,
+      windowsHide: true,
+    });
+    const database = new LibraryDatabase(":memory:");
+    database.seed(JSON.stringify([{
+      name: "Sample Game",
+      download_links: { direct_link: "https://downloads.example/game.zip" },
+      mods: [{
+        name: "Patch",
+        download_links: { direct_link: "https://downloads.example/patch.zip" },
+        steps_to_apply: [{
+          type: "move",
+          source_folder: "patch/game",
+          target_folder: "%GAME_ROOT%/game",
+        }],
+      }],
+    }]));
+    const manager = new DownloadManager(database, new Launcher(database));
+    const fetchMock = vi.fn().mockRejectedValue(new Error("Should use the existing archive."));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await manager.start({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      destination: root,
+      runAfter: false,
+      selectedModIds: [0],
+    });
+    await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(existsSync(archivePath)).toBe(true);
+    expect(existsSync(modArchivePath)).toBe(true);
+    expect(existsSync(path.join(installDir, "game.exe"))).toBe(true);
+    expect(await import("node:fs/promises").then(({ readFile }) =>
+      readFile(path.join(installDir, "game", "patch.rpy"), "utf8"))).toBe("reused mod");
+    database.close();
+  });
+
+  it("moves legacy game and mod archives out of the old hidden folder and reuses them", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    const legacyDirectory = path.join(root, ".redline-downloads");
+    const gameSource = path.join(root, "game-source");
+    const modSource = path.join(root, "mod-source");
+    mkdirSync(gameSource);
+    mkdirSync(path.join(modSource, "patch", "game"), { recursive: true });
+    mkdirSync(path.join(legacyDirectory, "mods"), { recursive: true });
+    writeFileSync(path.join(gameSource, "game.exe"), "launcher");
+    writeFileSync(path.join(modSource, "patch", "game", "patch.rpy"), "migrated mod");
+    const legacyArchive = path.join(legacyDirectory, "1.archive");
+    execFileSync(path7za, ["a", "-tzip", legacyArchive, "game.exe"], {
+      cwd: gameSource,
+      windowsHide: true,
+    });
+    const legacyMod = path.join(legacyDirectory, "mods", "Patch.zip");
+    execFileSync(path7za, ["a", legacyMod, "patch"], {
+      cwd: modSource,
+      windowsHide: true,
+    });
+    const database = new LibraryDatabase(":memory:");
+    database.seed(JSON.stringify([{
+      name: "Sample Game",
+      download_links: { direct_link: "https://downloads.example/game.zip" },
+      mods: [{
+        name: "Patch",
+        download_links: { direct_link: "https://downloads.example/patch.zip" },
+        steps_to_apply: [{
+          type: "move",
+          source_folder: "patch/game",
+          target_folder: "%GAME_ROOT%/game",
+        }],
+      }],
+    }]));
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "failed",
+      archivePath: legacyArchive,
+      installDir,
+      runAfter: false,
+      selectedModIds: [0],
+    });
+    const manager = new DownloadManager(database, new Launcher(database));
+    const fetchMock = vi.fn().mockRejectedValue(new Error("Should reuse legacy archives."));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await manager.start({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      destination: root,
+      runAfter: false,
+      selectedModIds: [0],
+    });
+    await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(existsSync(path.join(installDir, "game.zip"))).toBe(true);
+    expect(existsSync(path.join(installDir, "Patch.zip"))).toBe(true);
+    expect(existsSync(path.join(installDir, "game", "patch.rpy"))).toBe(true);
+    expect(existsSync(legacyArchive)).toBe(false);
+    expect(existsSync(legacyMod)).toBe(false);
     database.close();
   });
 });
@@ -265,15 +577,16 @@ describe("mod application", () => {
     const root = makeTempDirectory();
     const gameRoot = path.join(root, "game");
     const sourceRoot = path.join(root, "source");
-    const modContents = path.join(sourceRoot, "mod", "game");
+    const modContents = path.join(sourceRoot, "DEAR-0.3-Joker WT Mod", "Optional", "game", "gui");
     mkdirSync(gameRoot);
     mkdirSync(modContents, { recursive: true });
-    mkdirSync(path.join(gameRoot, "game"));
+    mkdirSync(path.join(gameRoot, "game", "gui"), { recursive: true });
     writeFileSync(path.join(gameRoot, "game", "existing.txt"), "base");
-    writeFileSync(path.join(modContents, "existing.txt"), "mod override");
+    writeFileSync(path.join(gameRoot, "game", "gui", "base.txt"), "base");
+    writeFileSync(path.join(modContents, "base.txt"), "mod override");
     writeFileSync(path.join(modContents, "new.txt"), "new mod file");
     const archive = path.join(root, "gallery.zip");
-    execFileSync(path7za, ["a", archive, "mod"], {
+    execFileSync(path7za, ["a", archive, "DEAR-0.3-Joker WT Mod"], {
       cwd: sourceRoot,
       windowsHide: true,
     });
@@ -283,14 +596,14 @@ describe("mod application", () => {
       download_links: { direct_link: "https://downloads.example/gallery.zip" },
       steps_to_apply: [{
         type: "move",
-        source_folder: "mod/game",
+        source_folder: "DEAR-0.3-Joker WT Mod/Optional/game",
         target_folder: "%GAME_ROOT%/game",
       }],
     }, gameRoot);
 
     const { readFile } = await import("node:fs/promises");
-    expect(await readFile(path.join(gameRoot, "game", "existing.txt"), "utf8")).toBe("mod override");
-    expect(await readFile(path.join(gameRoot, "game", "new.txt"), "utf8")).toBe("new mod file");
+    expect(await readFile(path.join(gameRoot, "game", "gui", "base.txt"), "utf8")).toBe("mod override");
+    expect(await readFile(path.join(gameRoot, "game", "gui", "new.txt"), "utf8")).toBe("new mod file");
   });
 
   it("rejects mod steps that escape the installation directory", async () => {
