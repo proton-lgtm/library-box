@@ -6,7 +6,7 @@
   "type": "module",
   "main": "./out/main/index.cjs",
   "scripts": {
-    "dev": "cross-env OPEN_DEVTOOLS=1 electron-vite dev",
+    "dev": "cross-env OPEN_DEVTOOLS=0 electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.electron.json",
     "test": "vitest run",

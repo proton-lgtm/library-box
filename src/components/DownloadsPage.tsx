@@ -14,10 +14,11 @@ interface DownloadsPageProps {
   downloads: DownloadRecord[];
   onPause: (gameId: number) => void;
   onResume: (gameId: number) => void;
+  onManual?: (gameId: number) => void;
   onCancel: (gameId: number) => void;
 }
 
-export function DownloadsPage({ downloads, onPause, onResume, onCancel }: DownloadsPageProps) {
+export function DownloadsPage({ downloads, onPause, onResume, onManual, onCancel }: DownloadsPageProps) {
   const active = downloads.filter((item) => item.status === "downloading" || item.status === "paused" || item.status === "failed");
   const samples = useRef(new Map<number, DownloadSample>());
   const [remainingSeconds, setRemainingSeconds] = useState<Record<number, number>>({});
@@ -140,7 +141,13 @@ export function DownloadsPage({ downloads, onPause, onResume, onCancel }: Downlo
                   <div className="download-actions">
                     {download.status === "downloading" && !isProcessing ? (
                       <button className="icon-button" onClick={() => onPause(download.gameId)} aria-label="Pause"><Pause size={17} /></button>
-                    ) : download.status !== "downloading" ? (
+                    ) : download.status === "failed" ? (
+                      <>
+                        {onManual && (
+                          <button className="action-button" onClick={() => onManual(download.gameId)}>Try Manually</button>
+                        )}
+                      </>
+                    ) : download.status === "paused" ? (
                       <button className="action-button" onClick={() => onResume(download.gameId)}><Play size={16} /> Resume</button>
                     ) : null}
                     {download.phase !== "extracting" && (

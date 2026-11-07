@@ -114,6 +114,7 @@ export interface DesktopApi {
   startDownload(input: StartDownloadInput): Promise<void>;
   pauseDownload(gameId: number): Promise<void>;
   resumeDownload(gameId: number): Promise<void>;
+  manualDownload(gameId: number): Promise<void>;
   cancelDownload(gameId: number): Promise<void>;
   applyMods(gameId: number, modIds: number[]): Promise<void>;
   launchGame(gameId: number): Promise<void>;

@@ -1276,7 +1276,7 @@ input:focus-visible {
 
 .toast-error {
   position: fixed;
-  z-index: 20;
+  z-index: 100;
   right: 22px;
   bottom: 20px;
   display: flex;
@@ -1313,7 +1313,7 @@ input:focus-visible {
   place-items: center;
   padding: 20px;
   background: #05040dd9;
-  backdrop-filter: blur(7px);
+  /* backdrop-filter: blur(7px); */
 }
 
 .dialog-card {

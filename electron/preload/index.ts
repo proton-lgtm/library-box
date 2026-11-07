@@ -15,6 +15,7 @@ const api: DesktopApi = {
   startDownload: (input: StartDownloadInput) => ipcRenderer.invoke("library:start-download", input),
   pauseDownload: (gameId: number) => ipcRenderer.invoke("library:pause-download", gameId),
   resumeDownload: (gameId: number) => ipcRenderer.invoke("library:resume-download", gameId),
+  manualDownload: (gameId: number) => ipcRenderer.invoke("library:manual-download", gameId),
   cancelDownload: (gameId: number) => ipcRenderer.invoke("library:cancel-download", gameId),
   applyMods: (gameId: number, modIds: number[]) => ipcRenderer.invoke("library:apply-mods", gameId, modIds),
   launchGame: (gameId: number) => ipcRenderer.invoke("library:launch-game", gameId),

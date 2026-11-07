@@ -1,14 +1,5 @@
 {
   "servers": {
-    "windows-mcp": {
-      "command": "uvx",
-      "args": [
-        "windows-mcp",
-        "serve"
-      ],
-      "env": {
-        "ANONYMIZED_TELEMETRY": "false"
-      }
-    }
+    
   }
 }

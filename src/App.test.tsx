@@ -51,6 +51,7 @@ beforeEach(() => {
     startDownload: vi.fn().mockResolvedValue(undefined),
     pauseDownload: vi.fn().mockResolvedValue(undefined),
     resumeDownload: vi.fn().mockResolvedValue(undefined),
+    manualDownload: vi.fn().mockResolvedValue(undefined),
     cancelDownload: vi.fn().mockResolvedValue(undefined),
     applyMods: vi.fn().mockResolvedValue(undefined),
     launchGame: vi.fn().mockResolvedValue(undefined),

@@ -77,6 +77,7 @@ export function registerIpc(
   });
   handle("library:pause-download", (gameId) => downloads.pause(gameIdSchema.parse(gameId)));
   handle("library:resume-download", (gameId) => downloads.resume(gameIdSchema.parse(gameId)));
+  handle("library:manual-download", (gameId) => downloads.manualDownload(gameIdSchema.parse(gameId)));
   handle("library:cancel-download", (gameId) => downloads.cancel(gameIdSchema.parse(gameId)));
   handle("library:apply-mods", (gameId, modIds) => {
     const parsed = applyModsSchema.parse({ gameId, modIds });

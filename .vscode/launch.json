@@ -6,6 +6,34 @@
       "type": "node-terminal",
       "request": "launch",
       "command": "npm run dev"
+    },
+    {
+      "name": "Run (Electron with inspector)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev -- --inspect=5858 --sourcemap"
+    },
+    {
+      "name": "Attach to Electron main",
+      "type": "node",
+      "request": "attach",
+      "port": 5858,
+      "restart": true,
+      "sourceMaps": true,
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/**",
+        "!**/node_modules/**"
+      ]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Debug Electron downloads",
+      "configurations": [
+        "Run (Electron with inspector)",
+        "Attach to Electron main"
+      ],
+      "stopAll": true
     }
   ]
 }

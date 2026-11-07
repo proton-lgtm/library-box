@@ -151,7 +151,13 @@ function App() {
       setSelected(null);
       await refresh();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (message.toLowerCase().includes("download destination") ||
+          message.toLowerCase().includes("destination folder")) {
+        setDestination("");
+        localStorage.removeItem(INSTALL_FOLDER_KEY);
+      }
+      setError(message);
     } finally {
       setStarting(false);
     }
@@ -278,6 +284,7 @@ function App() {
           downloads={downloads}
           onPause={(gameId) => void runAction(() => window.library.pauseDownload(gameId))}
           onResume={(gameId) => void runAction(() => window.library.resumeDownload(gameId))}
+          onManual={(gameId) => void runAction(() => window.library.manualDownload(gameId))}
           onCancel={(gameId) => void runAction(() => window.library.cancelDownload(gameId))}
         />
       ) : (

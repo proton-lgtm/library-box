@@ -6,9 +6,26 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { path7za } from "7zip-bin";
+
+vi.mock("electron", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("electron")>();
+  class TestBrowserWindow {
+    webContents = {
+      executeJavaScript: vi.fn(async () =>
+        '<a class="download-btn" hx-get="/und5pmrgbz5r/download?t=MTc5NDA0ODE5NDk3Nw.3dbjHyHwzlOnBLuyELv5lsscMy46YomEJKiSWcnV1IM&amp;alt=true">Download</a>'),
+    };
+    async loadURL(): Promise<void> {}
+    isDestroyed(): boolean { return false; }
+    close(): void {}
+  }
+  return { ...actual, BrowserWindow: TestBrowserWindow };
+});
 import { validateArchivePaths, extractArchive } from "./archive";
 import { canTransition, LibraryDatabase } from "./database";
-import { DownloadManager } from "./downloads/download-manager";
+import {
+  DownloadManager,
+  isBrowserHost,
+} from "./downloads/download-manager";
 import { Launcher } from "./launcher";
 import { LibraryManager } from "./library-manager";
 import { applyModArchive } from "./downloads/mod-installer";
@@ -441,6 +458,48 @@ describe("SQLite library", () => {
 });
 
 describe("download controls", () => {
+  it("overwrites an existing game folder when it has no reusable archive", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    mkdirSync(installDir);
+    writeFileSync(path.join(installDir, "old-file.txt"), "stale installation");
+    const source = path.join(root, "source");
+    mkdirSync(source);
+    writeFileSync(path.join(source, "game.exe"), "fresh installation");
+    const archivePath = path.join(root, "fresh-game.zip");
+    execFileSync(path7za, ["a", archivePath, "game.exe"], {
+      cwd: source,
+      windowsHide: true,
+    });
+    const database = makeDatabase();
+    const manager = new DownloadManager(database, new Launcher(database));
+    const archiveBytes = await import("node:fs/promises").then(({ readFile }) => readFile(archivePath));
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(archiveBytes, {
+      status: 200,
+      headers: { "content-type": "application/zip" },
+    }))));
+
+    await manager.start({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      destination: root,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"));
+
+    expect(existsSync(path.join(installDir, "old-file.txt"))).toBe(false);
+    expect(existsSync(path.join(installDir, "game.exe"))).toBe(true);
+    database.close();
+  });
+
+  it("opens browser-hosted downloads in the download browser", () => {
+    expect(isBrowserHost(new URL("https://bzzhr.to/und5pmrgbz5r"))).toBe(true);
+    expect(isBrowserHost(new URL("https://buzzheavier.com/example"))).toBe(true);
+    expect(isBrowserHost(new URL("https://gofile.io/d/example"))).toBe(true);
+    expect(isBrowserHost(new URL("https://downloads.example/game.zip"))).toBe(false);
+  });
+
   it("pauses, resumes, and cancels an active direct download", async () => {
     const database = makeDatabase();
     const directory = makeTempDirectory();

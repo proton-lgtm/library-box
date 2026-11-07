@@ -1,9 +1,9 @@
-import { BrowserWindow, type DownloadItem } from "electron";
+import { BrowserWindow, session, type DownloadItem } from "electron";
 import { createWriteStream, existsSync, statSync } from "node:fs";
 import { lstat, mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { once } from "node:events";
 import path from "node:path";
-import type { DownloadUpdate, GameMod, StartDownloadInput } from "../../../src/shared/types";
+import type { DownloadUpdate, Game, GameMod, StartDownloadInput } from "../../../src/shared/types";
 import { extractArchive, findGameRootInArchive, isSupportedArchive } from "../archive";
 import type { LibraryDatabase } from "../database";
 import { findGameLauncher, type Launcher } from "../launcher";
@@ -27,7 +27,7 @@ function safeUrl(raw: string): URL {
     throw new Error("Downloads must use a valid HTTPS URL.");
   }
   if (url.hostname === "localhost" || url.hostname.endsWith(".localhost") ||
-      url.hostname === "127.0.0.1" || url.hostname === "::1") {
+    url.hostname === "127.0.0.1" || url.hostname === "::1") {
     throw new Error("Downloads cannot target a local host.");
   }
   return url;
@@ -37,9 +37,70 @@ function safeFolderName(value: string): string {
   return value.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/g, "").trim() || "game";
 }
 
-function isBrowserHost(url: URL): boolean {
+function gameFolderName(game: Pick<Game, "id" | "name" | "supabaseId">): string {
+  const name = game.name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "game";
+  if (!game.supabaseId) return safeFolderName(game.name);
+  const guidPrefix = game.supabaseId.replace(/-/g, "").slice(0, 8);
+  return `${name}_${guidPrefix}`;
+}
+
+export function isBrowserHost(url: URL): boolean {
   return url.hostname === "gofile.io" || url.hostname.endsWith(".gofile.io") ||
-    url.hostname === "workupload.com" || url.hostname.endsWith(".workupload.com");
+    url.hostname === "workupload.com" || url.hostname.endsWith(".workupload.com") ||
+    url.hostname === "bzzhr.to" || url.hostname.endsWith(".bzzhr.to") ||
+    url.hostname === "buzzheavier.com" || url.hostname.endsWith(".buzzheavier.com");
+}
+
+const DOWNLOAD_BROWSER_PARTITION = "persist:download-browser";
+const STORAGE_PERMISSIONS = new Set([
+  "persistent-storage",
+  "storage-access",
+  "top-level-storage-access",
+]);
+function isTrustedBrowserPage(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === "https:" && isBrowserHost(url);
+  } catch {
+    return false;
+  }
+}
+
+function isSecureOrigin(rawUrl: string | undefined): boolean {
+  if (!rawUrl) return false;
+  try {
+    return new URL(rawUrl).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function configureDownloadBrowserSession(): void {
+  const browserSession = session.fromPartition(DOWNLOAD_BROWSER_PARTITION);
+  browserSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    return STORAGE_PERMISSIONS.has(permission) &&
+      webContents !== null &&
+      isTrustedBrowserPage(webContents.getURL()) &&
+      isSecureOrigin(requestingOrigin);
+  });
+  browserSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const allowed = STORAGE_PERMISSIONS.has(permission) &&
+      isTrustedBrowserPage(webContents.getURL()) &&
+      isSecureOrigin(details.requestingUrl);
+    callback(allowed);
+  });
+}
+
+function downloadBrowserPreferences(): Electron.WebPreferences {
+  return {
+    partition: DOWNLOAD_BROWSER_PARTITION,
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+  };
 }
 
 function resolveDirectUrl(url: URL): URL {
@@ -58,7 +119,7 @@ function validateDestination(inputPath: string): string {
   }
   const resolved = path.resolve(inputPath);
   const root = path.parse(resolved).root;
-  if (resolved === root || !existsSync(resolved)) {
+  if (resolved === root || !existsSync(resolved) || !statSync(resolved).isDirectory()) {
     throw new Error("The selected destination must be an existing folder.");
   }
   return resolved;
@@ -113,7 +174,7 @@ async function getArchiveExtension(archivePath: string): Promise<string | undefi
   if (signature[0] === 0x50 && signature[1] === 0x4b) return ".zip";
   if ([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c].every((byte, index) => signature[index] === byte)) return ".7z";
   if ([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07].every((byte, index) => signature[index] === byte) &&
-      [0x00, 0x01].includes(signature[6])) return ".rar";
+    [0x00, 0x01].includes(signature[6])) return ".rar";
   return undefined;
 }
 
@@ -151,7 +212,7 @@ export class DownloadManager {
   constructor(
     private readonly database: LibraryDatabase,
     private readonly launcher: Launcher,
-  ) {}
+  ) { }
 
   onUpdate(listener: (update: DownloadUpdate) => void): () => void {
     this.listeners.add(listener);
@@ -174,7 +235,7 @@ export class DownloadManager {
     }
     if (this.transfers.has(game.id)) throw new Error("This game already has an active download.");
     const destination = validateDestination(input.destination);
-    const installDir = path.resolve(destination, safeFolderName(game.name));
+    const installDir = path.resolve(destination, gameFolderName(game));
     if (!installDir.startsWith(`${destination}${path.sep}`)) {
       throw new Error("The installation path is outside the selected destination.");
     }
@@ -185,10 +246,10 @@ export class DownloadManager {
       if (details.isSymbolicLink() || !details.isDirectory()) {
         throw new Error("The game folder must be a regular directory.");
       }
-      const knownFolder = previous && path.resolve(previous.installDir) === installDir;
       const hasArchive = findExistingGameArchive(installDir, path.join(installDir, `game${archiveExtension(url)}`));
-      if (!knownFolder && !hasArchive) {
-        throw new Error("The game folder already exists and contains no reusable game archive.");
+      if (!hasArchive) {
+        await rm(installDir, { recursive: true, force: true });
+        await mkdir(installDir, { recursive: true });
       }
     } else {
       await mkdir(installDir, { recursive: true });
@@ -260,6 +321,28 @@ export class DownloadManager {
     });
     this.emit(gameId);
     transfer.completion = this.resumeTransfer(gameId, validatedUrl, transfer);
+  }
+
+  manualDownload(gameId: number): void {
+    const record = this.database.getDownload(gameId);
+    if (!record || record.status !== "failed") {
+      throw new Error("Manual download is only available for failed downloads.");
+    }
+    const transfer = this.transfers.get(gameId) ?? {};
+    this.transfers.set(gameId, transfer);
+    this.database.updateDownload(gameId, {
+      status: "downloading",
+      error: null,
+      phase: null,
+      phaseDetail: null,
+    });
+    this.emit(gameId);
+    transfer.completion = this.startBrowserTransfer(
+      gameId,
+      safeUrl(record.url),
+      record.archivePath,
+      transfer,
+    );
   }
 
   private async resumeTransfer(gameId: number, url: URL, transfer: Transfer): Promise<void> {
@@ -511,11 +594,7 @@ export class DownloadManager {
       for (let redirects = 0; redirects <= 8; redirects += 1) {
         response = await fetch(url, {
           signal: controller.signal,
-          redirect: "manual",
-          headers: {
-            "User-Agent": "RedlineLibrary/1.0",
-            ...(existingBytes > 0 ? { Range: `bytes=${existingBytes}-` } : {}),
-          },
+          redirect: "manual"
         });
         if (![301, 302, 303, 307, 308].includes(response.status)) break;
         const location = response.headers.get("location");
@@ -605,12 +684,9 @@ export class DownloadManager {
         width: 1000,
         height: 720,
         title: "Complete download in browser",
-        webPreferences: {
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-        },
+        webPreferences: downloadBrowserPreferences(),
       });
+      const browserSession = browser.webContents.session;
       transfer.browser = browser;
       const handleDownload = (
         _event: Electron.Event,
@@ -645,7 +721,6 @@ export class DownloadManager {
           this.emit(gameId);
         });
         item.once("done", (_doneEvent, state) => {
-          browser.close();
           transfer.item = undefined;
           transfer.browser = undefined;
           if (this.database.getDownload(gameId)?.status === "cancelled") {
@@ -669,11 +744,12 @@ export class DownloadManager {
             .catch((error: unknown) => this.fail(gameId, error))
             .finally(finish);
         });
+        browser.close();
       };
-      browser.webContents.session.on("will-download", handleDownload);
+      browserSession.on("will-download", handleDownload);
       browser.once("closed", () => {
         if (transfer.browser === browser) transfer.browser = undefined;
-        browser.webContents.session.removeListener("will-download", handleDownload);
+        browserSession.removeListener("will-download", handleDownload);
         if (!downloadStarted && this.transfers.has(gameId)) {
           this.transfers.delete(gameId);
           this.database.updateDownload(gameId, {
@@ -816,8 +892,7 @@ export class DownloadManager {
       for (let redirects = 0; redirects <= 8; redirects += 1) {
         response = await fetch(url, {
           signal: controller.signal,
-          redirect: "manual",
-          headers: { "User-Agent": "RedlineLibrary/1.0" },
+          redirect: "manual"
         });
         if (![301, 302, 303, 307, 308].includes(response.status)) break;
         const location = response.headers.get("location");
@@ -878,8 +953,9 @@ export class DownloadManager {
         width: 1000,
         height: 720,
         title: "Complete mod download in browser",
-        webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+        webPreferences: downloadBrowserPreferences(),
       });
+      const browserSession = browser.webContents.session;
       transfer.browser = browser;
       let downloadStarted = false;
       let settled = false;
@@ -888,7 +964,7 @@ export class DownloadManager {
         settled = true;
         if (transfer.browser === browser) transfer.browser = undefined;
         transfer.item = undefined;
-        browser.webContents.session.removeListener("will-download", handleDownload);
+        browserSession.removeListener("will-download", handleDownload);
         if (!browser.isDestroyed()) browser.close();
         if (error) reject(error);
       };
@@ -935,10 +1011,11 @@ export class DownloadManager {
             resolve(modArchive);
           })().catch((error: unknown) => finish(error instanceof Error ? error : new Error(String(error))));
         });
+        browser.close();
       };
-      browser.webContents.session.on("will-download", handleDownload);
+      browserSession.on("will-download", handleDownload);
       browser.once("closed", () => {
-        browser.webContents.session.removeListener("will-download", handleDownload);
+        browserSession.removeListener("will-download", handleDownload);
         if (!settled && !downloadStarted) finish(new Error(`The browser was closed before "${path.basename(modArchive)}" downloaded.`));
       });
       void browser.loadURL(url.href).catch((error: unknown) =>
