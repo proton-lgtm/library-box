@@ -101,6 +101,14 @@ describe("Supabase catalog", () => {
             name: "Patch",
             download_links: { direct_link: "https://downloads.example/patch.zip" },
             steps_to_apply: [{ type: "extract", target_folder: "." }],
+          }, {
+            name: "Full Save",
+            asset_type: "file",
+            download_links: { direct_link: "https://downloads.example/1-5-LT1.save" },
+            steps_to_apply: [{
+              type: "move",
+              target_path: "%GAME_ROOT%/game/saves/1-5-LT1.save",
+            }],
           }],
         },
       }],
@@ -117,7 +125,17 @@ describe("Supabase catalog", () => {
       description: "A sample description.",
       releaseDate: "2026-10-25",
       developerLinks: { patreon: "https://patreon.com/example" },
-      mods: [{ name: "Patch" }],
+      mods: [
+        { name: "Patch", asset_type: "zip" },
+        {
+          name: "Full Save",
+          asset_type: "file",
+          steps_to_apply: [{
+            type: "move",
+            target_path: "%GAME_ROOT%/game/saves/1-5-LT1.save",
+          }],
+        },
+      ],
     });
     database.close();
   });

@@ -901,14 +901,19 @@ input:focus-visible {
 }
 
 .download-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #ffffff0a;
+  border-radius: 13px;
+  background: linear-gradient(105deg, #17152d, #131225);
+}
+
+.download-card-main {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 15px;
   padding: 12px;
-  border: 1px solid #ffffff0a;
-  border-radius: 13px;
-  background: linear-gradient(105deg, #17152d, #131225);
 }
 
 .download-cover {
@@ -966,6 +971,75 @@ input:focus-visible {
 .status-cancelled {
   color: #bbb4ca;
   background: #302d39;
+}
+
+.status-waiting {
+  color: #d8d2e8;
+  background: #333040;
+}
+
+.status-applying,
+.status-completed {
+  color: #b8f4dd;
+  background: #1e493c;
+}
+
+.mod-queue-list {
+  display: grid;
+  padding: 0 12px 10px 113px;
+  border-top: 1px solid #ffffff0a;
+  background: #0e0c1c66;
+}
+
+.mod-queue-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+}
+
+.mod-queue-row+.mod-queue-row {
+  border-top: 1px solid #ffffff0a;
+}
+
+.mod-queue-row .download-info h3 {
+  font-size: 13px;
+}
+
+.mod-accordion-toggle svg {
+  transition: transform .18s ease;
+}
+
+.mod-accordion-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.queue-clear-button {
+  margin-left: auto;
+  padding: 7px 11px;
+  border: 1px solid #ffffff14;
+  border-radius: 8px;
+  color: #c8c0d8;
+  background: #ffffff09;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.queue-clear-button:hover {
+  color: #fff;
+  background: #ffffff13;
+}
+
+.queue-delete-button {
+  color: #d1c8df;
+  background: #302b42;
+}
+
+.queue-delete-button:hover {
+  color: #fff;
+  background: #4a405f;
 }
 
 .download-measure {
@@ -1387,6 +1461,106 @@ input:focus-visible {
   font-weight: 620;
 }
 
+.dialog-select-field {
+  position: relative;
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  color: #d2cde1;
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.provider-select-trigger,
+.provider-select-menu button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  color: #f3efff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.provider-select-trigger {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid #ffffff1f;
+  border-radius: 9px;
+  background: #0d0b1a;
+  box-shadow: inset 0 1px #ffffff08;
+}
+
+.provider-select-trigger:hover,
+.provider-select-trigger[aria-expanded="true"] {
+  border-color: #8f62d6;
+  background: #151126;
+}
+
+.provider-select-trigger:focus-visible {
+  outline: 2px solid #9c6cf1;
+  outline-offset: 2px;
+}
+
+.provider-select-trigger>span:nth-child(2),
+.provider-select-menu button>span:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+}
+
+.provider-select-menu {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  overflow: hidden;
+  padding: 5px;
+  border: 1px solid #ffffff1f;
+  border-radius: 10px;
+  background: #171327;
+  box-shadow: 0 14px 32px #000a;
+}
+
+.provider-select-menu button {
+  min-height: 40px;
+  padding: 0 9px;
+  border-radius: 7px;
+  background: transparent;
+}
+
+.provider-select-menu button:hover,
+.provider-select-menu button:focus-visible,
+.provider-select-menu button.selected {
+  outline: none;
+  background: #2b2149;
+}
+
+.provider-select-menu button.selected {
+  color: #d9c7ff;
+}
+
+.provider-favicon {
+  position: relative;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  place-items: center;
+  border-radius: 6px;
+  color: #9d8fc0;
+  background: #ffffff0d;
+}
+
+.provider-favicon img {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+}
+
 .folder-picker {
   display: flex;
   align-items: center;
@@ -1719,9 +1893,14 @@ input:focus-visible {
     font-size: 9px;
   }
 
-  .download-card {
+  .download-card-main {
     gap: 9px;
     padding: 9px;
+  }
+
+  .mod-queue-list {
+    padding-right: 9px;
+    padding-left: 76px;
   }
 
   .download-cover {

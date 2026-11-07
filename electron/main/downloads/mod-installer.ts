@@ -17,6 +17,22 @@ function resolveInside(base: string, value: string, gameRoot?: string): string {
   return resolved;
 }
 
+async function rejectLinkedTargetPath(root: string, target: string): Promise<void> {
+  const relative = path.relative(root, target);
+  let current = root;
+  for (const segment of ["", ...relative.split(path.sep).filter(Boolean)]) {
+    if (segment) current = path.join(current, segment);
+    try {
+      if ((await lstat(current)).isSymbolicLink()) {
+        throw new Error("Mod target path contains a symbolic link.");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  }
+}
+
 async function findArchives(directory: string): Promise<string[]> {
   const found: string[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -65,19 +81,25 @@ export async function applyModArchive(
   const workDir = path.join(path.dirname(archivePath), `extract-${path.basename(archivePath)}-${Date.now()}`);
   await mkdir(workDir, { recursive: true });
   try {
-    if (!directFile && isSupportedArchive(archivePath)) {
+    if (!directFile) {
       await extractArchive(archivePath, workDir);
       for (const step of mod.steps_to_apply) {
         if (step.type === "extract") {
+          if (!step.target_folder) throw new Error("Extract steps require target_folder.");
           const target = resolveInside(safeRoot, step.target_folder, safeRoot);
+          await rejectLinkedTargetPath(safeRoot, target);
           await mkdir(target, { recursive: true });
           for (const nestedArchive of await findArchives(workDir)) {
             await extractArchive(nestedArchive, target);
           }
           continue;
         }
+        if (!step.target_folder || step.target_path) {
+          throw new Error("Archive move steps require target_folder.");
+        }
         const source = resolveInside(workDir, step.source_folder ?? "");
         const target = resolveInside(safeRoot, step.target_folder, safeRoot);
+        await rejectLinkedTargetPath(safeRoot, target);
         const sourceInfo = await lstat(source).catch((error: NodeJS.ErrnoException) => {
           if (error.code === "ENOENT") throw new Error(`Mod source folder was not found: ${step.source_folder ?? ""}`);
           throw error;
@@ -93,14 +115,25 @@ export async function applyModArchive(
       return;
     }
 
-    if (mod.steps_to_apply.length !== 1 || mod.steps_to_apply[0].type !== "move" ||
-        mod.steps_to_apply[0].source_folder) {
-      throw new Error(`Direct file mod "${mod.name}" requires one move step without a source folder.`);
+    const step = mod.steps_to_apply[0];
+    if (mod.steps_to_apply.length !== 1 || step?.type !== "move" || step.source_folder ||
+        Boolean(step.target_folder) === Boolean(step.target_path)) {
+      throw new Error(
+        `Direct file mod "${mod.name}" requires one move step with target_folder or target_path.`,
+      );
     }
-    const target = resolveInside(safeRoot, mod.steps_to_apply[0].target_folder, safeRoot);
-    await mkdir(target, { recursive: true });
-    const filename = path.basename(archivePath);
-    await cp(archivePath, path.join(target, filename), { force: true });
+    if (step.target_path) {
+      const target = resolveInside(safeRoot, step.target_path, safeRoot);
+      await rejectLinkedTargetPath(safeRoot, target);
+      await mkdir(path.dirname(target), { recursive: true });
+      await cp(archivePath, target, { force: true });
+    } else {
+      const target = resolveInside(safeRoot, step.target_folder!, safeRoot);
+      const destination = path.join(target, path.basename(archivePath));
+      await rejectLinkedTargetPath(safeRoot, destination);
+      await mkdir(target, { recursive: true });
+      await cp(archivePath, destination, { force: true });
+    }
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }

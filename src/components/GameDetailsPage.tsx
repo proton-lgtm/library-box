@@ -6,8 +6,10 @@ import { bestDownloadLink, displayLabel, formatBytes, formatDate } from "./forma
 interface GameDetailsPageProps {
   game: Game;
   installed: boolean;
+  downloading: boolean;
   onBack: () => void;
   onDownload: () => void;
+  onViewDownloads: () => void;
   onLaunch: () => void;
   onApplyMods: () => void;
   onOpenExternal: (url: string) => void;
@@ -16,8 +18,10 @@ interface GameDetailsPageProps {
 export function GameDetailsPage({
   game,
   installed,
+  downloading,
   onBack,
   onDownload,
+  onViewDownloads,
   onLaunch,
   onApplyMods,
   onOpenExternal,
@@ -57,11 +61,11 @@ export function GameDetailsPage({
                 </div>
                 <button
                   className="button-primary"
-                  disabled={!installed && !mainDownload}
-                  onClick={installed ? onLaunch : onDownload}
+                  disabled={!installed && !downloading && !mainDownload}
+                  onClick={installed ? onLaunch : downloading ? onViewDownloads : onDownload}
                 >
                   {installed ? <Play size={18} /> : <ArrowDownToLine size={18} />}
-                  {installed ? "Play" : "Download"}
+                  {installed ? "Play" : downloading ? "Downloading" : "Download"}
                 </button>
               </div>
               <p className="safe-note"><ShieldCheck size={16} /> Secure &amp; safe download · External link</p>

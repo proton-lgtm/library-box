@@ -65,13 +65,20 @@
       "out/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "assets/logo.png",
+        "to": "logo.png"
+      }
+    ],
     "asarUnpack": [
       "node_modules/7zip-bin/**",
       "node_modules/better-sqlite3/**"
     ],
     "win": {
       "icon": "assets/icons/icon.ico",
-      "target": "nsis"
+      "target": "portable",
+      "artifactName": "${productName}-${version}-portable.${ext}"
     },
     "mac": {
       "icon": "assets/icons/icon.icns",

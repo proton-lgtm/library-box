@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync, statSync } from "node:fs";
 import path from "node:path";
-import type { Download, DownloadPhase, DownloadStatus, Game, GameMod, InstalledGame } from "../../src/shared/types";
+import type { DownloadPhase, DownloadStatus, Game, GameDownloadRecord, GameMod, InstalledGame } from "../../src/shared/types";
 
 export interface CatalogEntry {
   id: string;
@@ -270,7 +270,7 @@ export class LibraryDatabase {
     return row ? mapGameRow(row) : undefined;
   }
 
-  listDownloads(): Download[] {
+  listDownloads(): GameDownloadRecord[] {
     return this.db.prepare(`
       SELECT d.game_id AS gameId, g.name AS gameName, g.thumbnail,
         d.status, d.bytes_downloaded AS bytesDownloaded,
@@ -280,7 +280,7 @@ export class LibraryDatabase {
       FROM downloads d JOIN games g ON g.id=d.game_id
       WHERE d.status != 'installed'
       ORDER BY d.updated_at DESC
-    `).all() as Download[];
+    `).all() as GameDownloadRecord[];
   }
 
   listLibrary(runningIds: ReadonlySet<number> = new Set()): InstalledGame[] {
@@ -335,7 +335,7 @@ export class LibraryDatabase {
     }
   }
 
-  getDownload(gameId: number): (Download & {
+  getDownload(gameId: number): (GameDownloadRecord & {
     archivePath: string;
     url: string;
     runAfter: boolean;
@@ -353,7 +353,7 @@ export class LibraryDatabase {
         d.applied_mods AS appliedMods
       FROM downloads d JOIN games g ON g.id=d.game_id
       WHERE d.game_id=?
-    `).get(gameId) as (Download & {
+    `).get(gameId) as (GameDownloadRecord & {
       archivePath: string;
       url: string;
       runAfter: number;
@@ -425,7 +425,7 @@ export class LibraryDatabase {
 
   updateDownload(
     gameId: number,
-    patch: Partial<Pick<Download, "status" | "bytesDownloaded" | "totalBytes" | "error" | "phase" | "phaseDetail">> &
+    patch: Partial<Pick<GameDownloadRecord, "status" | "bytesDownloaded" | "totalBytes" | "error" | "phase" | "phaseDetail">> &
       Partial<Pick<InstalledGame, "gameRoot" | "appliedModIds">>,
   ): void {
     const current = this.getDownload(gameId);
@@ -467,19 +467,30 @@ function normalizeMods(value: unknown, gameName: string): GameMod[] {
         Object.values(links).some((url) => typeof url !== "string")) {
       throw new Error(`Mod ${index + 1} for ${gameName} has invalid name or download links.`);
     }
+    const assetType = mod.asset_type ?? "zip";
     const steps = mod.steps_to_apply ?? [];
-    if (!Array.isArray(steps) || steps.some((step) =>
-      !step || !["extract", "move"].includes(step.type) ||
-      typeof step.target_folder !== "string" ||
-      (step.source_folder !== undefined && typeof step.source_folder !== "string"),
-    )) {
+    const invalidSteps = !Array.isArray(steps) || steps.some((step) => {
+      if (!step || !["extract", "move"].includes(step.type) ||
+          (step.target_folder !== undefined && typeof step.target_folder !== "string") ||
+          (step.target_path !== undefined && typeof step.target_path !== "string") ||
+          (step.source_folder !== undefined && typeof step.source_folder !== "string")) return true;
+      if (step.type === "extract") return !step.target_folder || step.target_path !== undefined;
+      return Boolean(step.target_folder) === Boolean(step.target_path);
+    });
+    const fileStep = steps[0];
+    const invalidFileSteps = assetType === "file" && (
+      steps.length !== 1 || fileStep?.type !== "move" || fileStep.source_folder ||
+      Boolean(fileStep?.target_folder) === Boolean(fileStep?.target_path)
+    );
+    if (!["file", "zip"].includes(assetType) || invalidSteps || invalidFileSteps ||
+        (assetType !== "file" && steps.some((step) => step.target_path))) {
       throw new Error(`Mod ${mod.name} for ${gameName} has invalid apply steps.`);
     }
     return {
       name: mod.name,
+      asset_type: assetType,
       download_links: { ...links },
       steps_to_apply: steps.map((step) => ({ ...step })),
-      ...(typeof mod.file_type === "string" ? { file_type: mod.file_type } : {}),
     };
   });
 }
@@ -500,7 +511,7 @@ function mapGameRow(row: GameDatabaseRow): Game {
     version: row.version,
     operatingSystems: JSON.parse(row.operating_systems) as string[],
     downloadLinks: JSON.parse(row.download_links) as Record<string, string>,
-    mods: JSON.parse(row.mods) as GameMod[],
+    mods: normalizeMods(JSON.parse(row.mods), row.name),
     installDir: row.installDir ?? null,
   };
 }

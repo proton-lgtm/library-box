@@ -1,11 +1,20 @@
 import type { Game } from "../shared/types";
 
-export function bestDownloadLink(game: Game): string | undefined {
-  const priority = ["direct_link", "pixeldrain", "gofile", "workupload", "direct"];
-  for (const key of priority) {
-    if (game.downloadLinks[key]) return game.downloadLinks[key];
+const DOWNLOAD_PROVIDER_PRIORITY = ["direct_link", "pixeldrain", "gofile", "workupload", "direct"];
+
+export function downloadProviders(game: Pick<Game, "downloadLinks">): Array<[string, string]> {
+  return Object.entries(game.downloadLinks).filter((entry): entry is [string, string] => Boolean(entry[1]));
+}
+
+export function bestDownloadProvider(game: Pick<Game, "downloadLinks">): [string, string] | undefined {
+  for (const key of DOWNLOAD_PROVIDER_PRIORITY) {
+    if (game.downloadLinks[key]) return [key, game.downloadLinks[key]];
   }
-  return Object.values(game.downloadLinks)[0];
+  return downloadProviders(game)[0];
+}
+
+export function bestDownloadLink(game: Pick<Game, "downloadLinks">): string | undefined {
+  return bestDownloadProvider(game)?.[1];
 }
 
 export function displayLabel(value: string): string {

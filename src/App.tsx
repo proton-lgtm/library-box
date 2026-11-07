@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw, X } from "lucide-react";
-import type { AuthCredentials, AuthState, Download, Game, InstalledGame } from "./shared/types";
+import type { AuthCredentials, AuthState, DownloadQueueItem, Game, InstalledGame } from "./shared/types";
 import { AppShell, type Page } from "./components/AppShell";
 import { ApplyModsDialog } from "./components/ApplyModsDialog";
 import { DeleteDialog } from "./components/DeleteDialog";
@@ -10,13 +10,13 @@ import { GameDetailsPage } from "./components/GameDetailsPage";
 import { HomePage } from "./components/HomePage";
 import { LibraryPage } from "./components/LibraryPage";
 import { ProfileDialog } from "./components/ProfileDialog";
-import { bestDownloadLink, formatDate } from "./components/format";
+import { formatDate } from "./components/format";
 
 const INSTALL_FOLDER_KEY = "game-library.install-folder";
 
 function App() {
   const [games, setGames] = useState<Game[]>([]);
-  const [downloads, setDownloads] = useState<Download[]>([]);
+  const [downloads, setDownloads] = useState<DownloadQueueItem[]>([]);
   const [library, setLibrary] = useState<InstalledGame[]>([]);
   const [page, setPage] = useState<Page>("home");
   const [selected, setSelected] = useState<Game | null>(null);
@@ -131,18 +131,12 @@ function App() {
     }
   };
 
-  const beginDownload = async (options: { runAfter: boolean; selectedModIds: number[] }) => {
+  const beginDownload = async (options: { url: string; runAfter: boolean; selectedModIds: number[] }) => {
     if (!selected || !destination) return;
-    const url = bestDownloadLink(selected);
-    if (!url) {
-      setError("No download link is configured.");
-      return;
-    }
     setStarting(true);
     try {
       await window.library.startDownload({
         gameId: selected.id,
-        url,
         destination,
         ...options,
       });
@@ -207,6 +201,8 @@ function App() {
     setApplyingMods(true);
     try {
       await window.library.applyMods(modsTarget.id, modIds);
+      setPage("downloads");
+      setModsTarget(null);
       await refresh();
     } finally {
       setApplyingMods(false);
@@ -269,8 +265,13 @@ function App() {
         <GameDetailsPage
           game={selected}
           installed={installedIds.has(selected.id)}
+          downloading={downloads.some((download) => download.kind === "game" && download.gameId === selected.id && !["cancelled", "completed"].includes(download.status))}
           onBack={() => setSelected(null)}
           onDownload={() => setDownloadDialog(true)}
+          onViewDownloads={() => {
+            setSelected(null);
+            setPage("downloads");
+          }}
           onLaunch={() => void runAction(() => window.library.launchGame(selected.id))}
           onApplyMods={() => {
             if (selectedInstalledGame) setModsTarget(selectedInstalledGame);
@@ -286,6 +287,23 @@ function App() {
           onResume={(gameId) => void runAction(() => window.library.resumeDownload(gameId))}
           onManual={(gameId) => void runAction(() => window.library.manualDownload(gameId))}
           onCancel={(gameId) => void runAction(() => window.library.cancelDownload(gameId))}
+          onCancelMod={(id) => void runAction(async () => {
+            if (!window.library.cancelModDownload) throw new Error("Mod cancellation is unavailable.");
+            await window.library.cancelModDownload(id);
+          })}
+          onRetryMod={(id) => void runAction(async () => {
+            if (!window.library.retryModDownload) throw new Error("Mod retry is unavailable.");
+            await window.library.retryModDownload(id);
+          })}
+          onGoToLibrary={() => setPage("library")}
+          onDismiss={(gameId) => void runAction(async () => {
+            if (!window.library.dismissTerminalDownload) throw new Error("Queue cleanup is unavailable.");
+            await window.library.dismissTerminalDownload(gameId);
+          })}
+          onClearFinished={() => void runAction(async () => {
+            if (!window.library.clearTerminalDownloads) throw new Error("Queue cleanup is unavailable.");
+            await window.library.clearTerminalDownloads();
+          })}
         />
       ) : (
         <LibraryPage
@@ -295,6 +313,9 @@ function App() {
           onStop={(gameId) => void runAction(() => window.library.stopGame(gameId))}
           onDelete={setDeleteTarget}
           onApplyMods={setModsTarget}
+          onViewDetails={(game) => {
+            setSelected(games.find((candidate) => candidate.id === game.id) ?? game);
+          }}
         />
       )}
 

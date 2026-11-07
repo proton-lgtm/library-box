@@ -53,7 +53,7 @@ export function registerIpc(
     const url = externalUrlSchema.parse(input);
     await shell.openExternal(url);
   });
-  handle("library:list-downloads", () => database.listDownloads());
+  handle("library:list-downloads", () => downloads.listQueue());
   handle("library:list-library", () => database.listLibrary(launcher.runningIds()));
   handle("library:choose-destination", async () => {
     const window = getWindow();
@@ -79,13 +79,22 @@ export function registerIpc(
   handle("library:resume-download", (gameId) => downloads.resume(gameIdSchema.parse(gameId)));
   handle("library:manual-download", (gameId) => downloads.manualDownload(gameIdSchema.parse(gameId)));
   handle("library:cancel-download", (gameId) => downloads.cancel(gameIdSchema.parse(gameId)));
+  handle("library:dismiss-terminal-download", (gameId) =>
+    downloads.dismissTerminalDownload(gameIdSchema.parse(gameId)));
+  handle("library:clear-terminal-downloads", () => downloads.clearTerminalDownloads());
+  handle("library:cancel-mod-download", (id) => downloads.cancelModDownload(z.string().min(1).max(128).parse(id)));
+  handle("library:retry-mod-download", (id) => downloads.retryModDownload(z.string().min(1).max(128).parse(id)));
   handle("library:apply-mods", (gameId, modIds) => {
     const parsed = applyModsSchema.parse({ gameId, modIds });
     return downloads.applyMods(parsed.gameId, parsed.modIds);
   });
   handle("library:launch-game", (gameId) => launcher.launch(gameIdSchema.parse(gameId)));
   handle("library:stop-game", (gameId) => launcher.stop(gameIdSchema.parse(gameId)));
-  handle("library:delete-game", (gameId) => library.deleteGame(gameIdSchema.parse(gameId)));
+  handle("library:delete-game", async (gameId) => {
+    const parsed = gameIdSchema.parse(gameId);
+    await library.deleteGame(parsed);
+    downloads.removeGameQueueHistory(parsed);
+  });
   handle("library:minimize-window", () => {
     const window = getWindow();
     if (!window || window.isDestroyed()) throw new Error("The app window is unavailable.");

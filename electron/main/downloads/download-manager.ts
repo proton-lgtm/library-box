@@ -3,8 +3,17 @@ import { createWriteStream, existsSync, statSync } from "node:fs";
 import { lstat, mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { once } from "node:events";
 import path from "node:path";
-import type { DownloadUpdate, Game, GameMod, StartDownloadInput } from "../../../src/shared/types";
-import { extractArchive, findGameRootInArchive, isSupportedArchive } from "../archive";
+import type {
+  DownloadQueueItem,
+  DownloadQueueStatus,
+  DownloadUpdate,
+  Game,
+  GameDownloadRecord,
+  GameMod,
+  ModDownloadQueueItem,
+  StartDownloadInput,
+} from "../../../src/shared/types";
+import { extractArchive, findGameRootInArchive } from "../archive";
 import type { LibraryDatabase } from "../database";
 import { findGameLauncher, type Launcher } from "../launcher";
 import { applyModArchive } from "./mod-installer";
@@ -14,6 +23,19 @@ interface Transfer {
   browser?: BrowserWindow;
   item?: DownloadItem;
   completion?: Promise<void>;
+}
+
+interface ModJob {
+  item: ModDownloadQueueItem;
+  gameRoot?: string;
+  cancelled: boolean;
+  manualBrowser?: boolean;
+}
+
+class ModCancelledError extends Error {
+  constructor() {
+    super("Mod download was cancelled.");
+  }
 }
 
 function safeUrl(raw: string): URL {
@@ -133,9 +155,7 @@ function preferredModUrl(mod: GameMod): string | undefined {
 }
 
 function isDirectFileMod(mod: GameMod): boolean {
-  return mod.steps_to_apply.length === 1 &&
-    mod.steps_to_apply[0].type === "move" &&
-    !mod.steps_to_apply[0].source_folder;
+  return mod.asset_type === "file";
 }
 
 function safeFileName(value: string): string {
@@ -145,6 +165,11 @@ function safeFileName(value: string): string {
 function archiveExtension(url: URL): string {
   const extension = path.extname(url.pathname).toLowerCase();
   return [".zip", ".7z", ".rar"].includes(extension) ? extension : ".zip";
+}
+
+function modFileExtension(mod: GameMod, url: URL): string {
+  const extension = path.extname(url.pathname).toLowerCase();
+  return isDirectFileMod(mod) ? extension || ".bin" : archiveExtension(url);
 }
 
 function findExistingGameArchive(installDir: string, preferredPath: string): string | undefined {
@@ -208,6 +233,9 @@ async function assertRegularDirectory(directory: string): Promise<void> {
 export class DownloadManager {
   private readonly transfers = new Map<number, Transfer>();
   private readonly listeners = new Set<(update: DownloadUpdate) => void>();
+  private readonly modJobs = new Map<string, ModJob>();
+  private readonly completedGames = new Map<number, DownloadQueueItem>();
+  private activeModId: string | undefined;
 
   constructor(
     private readonly database: LibraryDatabase,
@@ -217,6 +245,116 @@ export class DownloadManager {
   onUpdate(listener: (update: DownloadUpdate) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  listQueue(): DownloadQueueItem[] {
+    const games = this.database.listDownloads()
+      .filter((record) => !this.completedGames.has(record.gameId))
+      .map((record) => this.gameQueueItem(record));
+    return [
+      ...games,
+      ...Array.from(this.modJobs.values(), (job) => ({ ...job.item })),
+      ...Array.from(this.completedGames.values(), (item) => ({ ...item })),
+    ].sort((left, right) => left.gameId - right.gameId ||
+      (left.kind === right.kind
+        ? left.kind === "mod" && right.kind === "mod" ? left.modId - right.modId : 0
+        : left.kind === "game" ? -1 : 1));
+  }
+
+  dismissTerminalDownload(gameId: number): void {
+    const item = this.listQueue().find((entry) => entry.kind === "game" && entry.gameId === gameId);
+    if (!item || !this.isTerminalGameQueueItem(item)) {
+      throw new Error("Only completed or cancelled downloads can be dismissed.");
+    }
+    this.removeTerminalDownload(gameId, item.status);
+  }
+
+  clearTerminalDownloads(): void {
+    const terminalGames = this.listQueue().filter((item) =>
+      item.kind === "game" && this.isTerminalGameQueueItem(item));
+    for (const item of terminalGames) this.removeTerminalDownload(item.gameId, item.status);
+  }
+
+  private isTerminalGameQueueItem(item: DownloadQueueItem): boolean {
+    if (item.kind !== "game" || !["completed", "cancelled"].includes(item.status)) return false;
+    return Array.from(this.modJobs.values()).every((job) =>
+      job.item.gameId !== item.gameId || ["completed", "failed", "cancelled"].includes(job.item.status));
+  }
+
+  removeGameQueueHistory(gameId: number): void {
+    this.completedGames.delete(gameId);
+    for (const [id, job] of this.modJobs) {
+      if (job.item.gameId === gameId) this.modJobs.delete(id);
+    }
+  }
+
+  private removeTerminalDownload(gameId: number, status: DownloadQueueStatus): void {
+    if (status === "cancelled" && this.database.getDownload(gameId)?.status === "cancelled") {
+      this.database.removeCancelledDownload(gameId);
+    }
+    this.removeGameQueueHistory(gameId);
+  }
+
+  private gameQueueItem(record: GameDownloadRecord, status?: DownloadQueueStatus): DownloadQueueItem {
+    const queueStatus = status ?? (record.status === "installed"
+      ? "completed"
+      : record.phase && record.phase !== "downloading-mod"
+        ? "applying"
+        : record.status);
+    return {
+      id: `game:${record.gameId}`,
+      kind: "game",
+      gameId: record.gameId,
+      gameName: record.gameName,
+      thumbnail: record.thumbnail,
+      status: queueStatus,
+      bytesDownloaded: record.bytesDownloaded,
+      totalBytes: record.totalBytes,
+      expectedBytes: record.expectedBytes ?? null,
+      error: record.error,
+      phase: record.phase ?? null,
+      detail: record.phaseDetail ?? null,
+      phaseDetail: record.phaseDetail ?? null,
+      installDir: record.installDir,
+    };
+  }
+
+  private enqueueMods(game: Game, installDir: string, modIds: number[]): void {
+    for (const modId of modIds) {
+      const id = `mod:${game.id}:${modId}`;
+      this.modJobs.set(id, {
+        cancelled: false,
+        item: {
+          id,
+          kind: "mod",
+          gameId: game.id,
+          gameName: game.name,
+          thumbnail: game.thumbnail,
+          modId,
+          modName: game.mods[modId].name,
+          status: "waiting",
+          bytesDownloaded: 0,
+          totalBytes: null,
+          error: null,
+          phase: "downloading-mod",
+          detail: game.mods[modId].name,
+          phaseDetail: game.mods[modId].name,
+          installDir,
+        },
+      });
+      this.emitItem(this.modJobs.get(id)!.item);
+    }
+  }
+
+  private updateMod(id: string, patch: Partial<ModDownloadQueueItem>): void {
+    const job = this.modJobs.get(id);
+    if (!job) return;
+    Object.assign(job.item, patch);
+    this.emitItem(job.item);
+  }
+
+  private emitItem(item: DownloadQueueItem): void {
+    for (const listener of this.listeners) listener({ ...item });
   }
 
   async start(input: StartDownloadInput): Promise<void> {
@@ -258,6 +396,7 @@ export class DownloadManager {
     const rootArchive = findExistingGameArchive(installDir, preferredArchivePath);
     const migratedArchive = await this.migrateLegacyArchives(game.id, installDir, url);
     const archivePath = rootArchive ?? migratedArchive ?? preferredArchivePath;
+    this.completedGames.delete(game.id);
     this.database.saveDownload({
       gameId: game.id,
       status: "downloading",
@@ -270,6 +409,7 @@ export class DownloadManager {
       appliedModIds: [],
       phase: null,
     });
+    this.enqueueMods(game, installDir, selectedModIds);
     const transfer: Transfer = {};
     this.transfers.set(game.id, transfer);
     this.emit(game.id);
@@ -444,6 +584,7 @@ export class DownloadManager {
       throw new Error("Download cannot be cancelled in its current state.");
     }
     const transfer = this.transfers.get(gameId);
+    this.completedGames.delete(gameId);
     this.database.updateDownload(gameId, {
       status: "cancelled",
       error: null,
@@ -454,6 +595,12 @@ export class DownloadManager {
     transfer?.item?.cancel();
     transfer?.browser?.close();
     this.transfers.delete(gameId);
+    for (const job of this.modJobs.values()) {
+      if (job.item.gameId === gameId && !["completed", "failed", "cancelled"].includes(job.item.status)) {
+        job.cancelled = true;
+        this.updateMod(job.item.id, { status: "cancelled", error: null });
+      }
+    }
     await transfer?.completion;
     const partialArchives = [`${record.archivePath}.part`];
     const game = this.database.getGame(gameId);
@@ -462,12 +609,10 @@ export class DownloadManager {
       const modUrl = mod && preferredModUrl(mod);
       if (!mod || !modUrl) continue;
       const url = new URL(modUrl);
-      const extension = path.extname(url.pathname).toLowerCase() ||
-        (isDirectFileMod(mod) ? ".bin" : ".zip");
+      const extension = modFileExtension(mod, url);
       partialArchives.push(path.join(record.installDir, `${safeFileName(mod.name)}${extension}.part`));
     }
     await Promise.all(partialArchives.map((partialPath) => rm(partialPath, { force: true })));
-    this.database.removeCancelledDownload(gameId);
   }
 
   async applyMods(gameId: number, requestedModIds: number[]): Promise<void> {
@@ -495,51 +640,166 @@ export class DownloadManager {
     }
     if (modIds.length === 0) return;
 
+    const parentItem = this.gameQueueItem(record, "completed");
+    this.completedGames.set(gameId, parentItem);
+    this.emitItem(parentItem);
+    this.enqueueMods(game, record.installDir, modIds);
     const transfer: Transfer = {};
     this.transfers.set(gameId, transfer);
-    try {
-      for (const modId of modIds) {
-        const mod = game.mods[modId];
-        const url = preferredModUrl(mod);
-        if (!url) throw new Error(`Mod "${mod.name}" has no configured download link.`);
-        this.database.updateDownload(gameId, {
+    transfer.completion = this.processModQueue(game, record.installDir, record.gameRoot, modIds, transfer)
+      .finally(() => this.finishModOperation(gameId));
+  }
+
+  async cancelModDownload(id: string): Promise<void> {
+    const job = this.modJobs.get(id);
+    if (!job || job.item.kind !== "mod") throw new Error("Mod queue item was not found.");
+    if (["completed", "cancelled"].includes(job.item.status)) {
+      throw new Error("Mod download cannot be cancelled in its current state.");
+    }
+    job.cancelled = true;
+    this.updateMod(id, { status: "cancelled", error: null });
+    if (this.activeModId === id) {
+      const transfer = this.transfers.get(job.item.gameId);
+      transfer?.controller?.abort();
+      transfer?.item?.cancel();
+      transfer?.browser?.close();
+      await this.removeModPartial(job.item);
+    }
+  }
+
+  async retryModDownload(id: string): Promise<void> {
+    const job = this.modJobs.get(id);
+    if (!job || job.item.status !== "failed") {
+      throw new Error("Only failed mod downloads can be retried.");
+    }
+    const record = this.database.getDownload(job.item.gameId);
+    const game = this.database.getGame(job.item.gameId);
+    if (!record || record.status !== "installed" || !game) {
+      throw new Error("The game must be installed before retrying this mod.");
+    }
+    if (this.transfers.has(game.id)) throw new Error("This game already has an active operation.");
+    job.cancelled = false;
+    job.manualBrowser = true;
+    this.updateMod(id, {
+      status: "waiting",
+      bytesDownloaded: 0,
+      totalBytes: null,
+      error: null,
+      phase: "downloading-mod",
+    });
+    const transfer: Transfer = {};
+    this.transfers.set(game.id, transfer);
+    transfer.completion = this.processModQueue(game, record.installDir, record.gameRoot, [job.item.modId], transfer)
+      .finally(() => this.finishModOperation(game.id));
+  }
+
+  private finishModOperation(gameId: number): void {
+    this.transfers.delete(gameId);
+    const current = this.database.getDownload(gameId);
+    if (current?.status === "installed" && current.phase) {
+      this.database.updateDownload(gameId, { phase: null, phaseDetail: null });
+      this.emit(gameId);
+    }
+  }
+
+  private async processModQueue(
+    game: Game,
+    installDir: string,
+    gameRoot: string,
+    modIds: number[],
+    transfer: Transfer,
+  ): Promise<void> {
+    for (const modId of modIds) {
+      const id = `mod:${game.id}:${modId}`;
+      const job = this.modJobs.get(id);
+      if (!job || job.cancelled) continue;
+      const mod = game.mods[modId];
+      const rawUrl = preferredModUrl(mod);
+      if (!rawUrl) {
+        this.updateMod(id, { status: "failed", error: `No download link is configured for mod "${mod.name}".` });
+        continue;
+      }
+      this.activeModId = id;
+      job.gameRoot = gameRoot;
+      try {
+        this.updateMod(id, {
+          status: "downloading",
+          bytesDownloaded: 0,
+          totalBytes: null,
+          error: null,
           phase: "downloading-mod",
+          detail: mod.name,
           phaseDetail: mod.name,
         });
-        this.emit(gameId);
         const modArchive = await this.downloadMod(
-          gameId,
+          game.id,
           mod,
-          safeUrl(url),
-          record.installDir,
+          safeUrl(rawUrl),
+          installDir,
           transfer,
-          true,
+          this.database.getDownload(game.id)?.status === "installed",
+          id,
+          job.manualBrowser === true,
         );
-        this.database.updateDownload(gameId, {
+        job.manualBrowser = false;
+        if (job.cancelled) throw new ModCancelledError();
+        this.database.updateDownload(game.id, {
           phase: "applying-mods",
           phaseDetail: mod.name,
         });
-        this.emit(gameId);
-        await applyModArchive(modArchive, mod, record.gameRoot, isDirectFileMod(mod));
-        const latest = this.database.getDownload(gameId);
-        if (!latest || latest.status !== "installed") {
-          throw new Error("The installed game record changed while applying mods.");
+        this.emit(game.id);
+        this.updateMod(id, {
+          status: "applying",
+          phase: "applying-mods",
+          detail: mod.name,
+          phaseDetail: mod.name,
+        });
+        await applyModArchive(modArchive, mod, gameRoot, isDirectFileMod(mod));
+        if (job.cancelled) throw new ModCancelledError();
+        const latest = this.database.getDownload(game.id);
+        if (!latest) throw new Error("The game download record was lost while applying mods.");
+        if (!latest.appliedModIds.includes(modId)) {
+          this.database.updateDownload(game.id, {
+            appliedModIds: [...latest.appliedModIds, modId],
+          });
         }
-        this.database.updateDownload(gameId, {
-          appliedModIds: [...latest.appliedModIds, modId],
+        this.updateMod(id, {
+          status: "completed",
+          error: null,
           phase: null,
+          detail: null,
           phaseDetail: null,
         });
-        this.emit(gameId);
-      }
-    } finally {
-      this.transfers.delete(gameId);
-      const current = this.database.getDownload(gameId);
-      if (current?.status === "installed" && current.phase) {
-        this.database.updateDownload(gameId, { phase: null, phaseDetail: null });
-        this.emit(gameId);
+      } catch (error) {
+        await this.removeModPartial(job.item);
+        const gameStatus = this.database.getDownload(game.id)?.status;
+        if (!job.cancelled && gameStatus === "paused") {
+          this.updateMod(id, { status: "paused", error: null });
+          throw error;
+        }
+        if (!job.cancelled && gameStatus === "cancelled") throw error;
+        if (job.cancelled || error instanceof ModCancelledError ||
+            (error instanceof DOMException && error.name === "AbortError")) {
+          this.updateMod(id, { status: "cancelled", error: null });
+        } else {
+          this.updateMod(id, {
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        if (this.activeModId === id) this.activeModId = undefined;
       }
     }
+  }
+
+  private async removeModPartial(item: ModDownloadQueueItem): Promise<void> {
+    const game = this.database.getGame(item.gameId);
+    const mod = game?.mods[item.modId];
+    const rawUrl = mod && preferredModUrl(mod);
+    if (!mod || !rawUrl) return;
+    const extension = modFileExtension(mod, new URL(rawUrl));
+    await rm(path.join(item.installDir, `${safeFileName(mod.name)}${extension}.part`), { force: true });
   }
 
   private requireTransfer(gameId: number): Transfer {
@@ -551,16 +811,7 @@ export class DownloadManager {
   private emit(gameId: number): void {
     const record = this.database.getDownload(gameId);
     if (!record) return;
-    const update: DownloadUpdate = {
-      gameId,
-      bytesDownloaded: record.bytesDownloaded,
-      totalBytes: record.totalBytes,
-      status: record.status,
-      error: record.error,
-      phase: record.phase ?? null,
-      phaseDetail: record.phaseDetail ?? null,
-    };
-    for (const listener of this.listeners) listener(update);
+    this.emitItem(this.gameQueueItem(record));
   }
 
   private async installExistingArchive(
@@ -594,7 +845,8 @@ export class DownloadManager {
       for (let redirects = 0; redirects <= 8; redirects += 1) {
         response = await fetch(url, {
           signal: controller.signal,
-          redirect: "manual"
+          redirect: "manual",
+          headers: existingBytes > 0 ? { Range: `bytes=${existingBytes}-` } : undefined,
         });
         if (![301, 302, 303, 307, 308].includes(response.status)) break;
         const location = response.headers.get("location");
@@ -612,7 +864,8 @@ export class DownloadManager {
         throw new Error("The URL returned a web page, not an archive file.");
       }
       const range = response.headers.get("content-range");
-      if (response.status === 206 && !range?.startsWith(`bytes ${existingBytes}-`)) {
+      const rangeStart = range?.match(/^bytes (\d+)-\d+\/\d+$/)?.[1];
+      if (response.status === 206 && Number(rangeStart) !== existingBytes) {
         throw new Error("The server returned an invalid resume range.");
       }
       const supportsResume = response.status === 206 && existingBytes > 0;
@@ -780,34 +1033,6 @@ export class DownloadManager {
     });
     this.emit(gameId);
     await extractArchive(archivePath, record.installDir);
-    for (const modId of record.selectedModIds) {
-      const downloadState = this.database.getDownload(gameId);
-      if (!downloadState || downloadState.status === "cancelled") {
-        throw new Error("Installation was cancelled.");
-      }
-      const mod = game.mods[modId];
-      if (!mod) throw new Error(`Selected mod ${modId + 1} is no longer in the catalog.`);
-      const url = preferredModUrl(mod);
-      if (!url) throw new Error(`No download link is configured for mod "${mod.name}".`);
-      const modArchive = await this.downloadMod(
-        gameId,
-        mod,
-        safeUrl(url),
-        record.installDir,
-        transfer,
-      );
-      this.database.updateDownload(gameId, {
-        phase: "applying-mods",
-        phaseDetail: mod.name,
-      });
-      this.emit(gameId);
-      await applyModArchive(modArchive, mod, gameRoot, isDirectFileMod(mod));
-      const latest = this.database.getDownload(gameId);
-      if (!latest) throw new Error("The installed game record was lost while applying mods.");
-      this.database.updateDownload(gameId, {
-        appliedModIds: [...latest.appliedModIds, modId],
-      });
-    }
     this.database.updateDownload(gameId, {
       phase: "finalizing",
       phaseDetail: null,
@@ -815,6 +1040,23 @@ export class DownloadManager {
     this.emit(gameId);
     const launcher = await findGameLauncher(gameRoot);
     if (!launcher) throw new Error("No compatible game launcher was found in the archive.");
+    const extracted = this.database.getDownload(gameId);
+    if (!extracted || extracted.status === "cancelled") {
+      throw new Error("Installation was cancelled.");
+    }
+    const completedItem = this.gameQueueItem(extracted, "completed");
+    completedItem.phase = null;
+    completedItem.detail = null;
+    completedItem.phaseDetail = null;
+    this.completedGames.set(gameId, completedItem);
+    this.emitItem(completedItem);
+    await this.processModQueue(
+      game,
+      record.installDir,
+      gameRoot,
+      record.selectedModIds,
+      transfer,
+    );
     const current = this.database.getDownload(gameId);
     if (!current || current.status === "cancelled") {
       throw new Error("Installation was cancelled.");
@@ -825,6 +1067,8 @@ export class DownloadManager {
       phase: null,
       phaseDetail: null,
     });
+    const completed = this.database.getDownload(gameId);
+    if (completed) this.completedGames.set(gameId, this.gameQueueItem(completed, "completed"));
     this.transfers.delete(gameId);
     this.emit(gameId);
     if (record.runAfter) {
@@ -847,10 +1091,11 @@ export class DownloadManager {
     archiveDirectory: string,
     transfer: Transfer,
     keepInstalledStatus = false,
+    queueItemId?: string,
+    forceBrowser = false,
   ): Promise<string> {
-    const extension = path.extname(initialUrl.pathname).toLowerCase();
     const directFile = isDirectFileMod(mod);
-    const fileExtension = extension || (directFile ? ".bin" : ".zip");
+    const fileExtension = modFileExtension(mod, initialUrl);
     await mkdir(archiveDirectory, { recursive: true });
     const modArchive = path.join(archiveDirectory, `${safeFileName(mod.name)}${fileExtension}`);
     const partPath = `${modArchive}.part`;
@@ -872,8 +1117,14 @@ export class DownloadManager {
       phaseDetail: mod.name,
     });
     this.emit(gameId);
+    if (queueItemId) this.updateMod(queueItemId, {
+      status: "downloading",
+      bytesDownloaded: 0,
+      totalBytes: null,
+      error: null,
+    });
 
-    if (isBrowserHost(initialUrl)) {
+    if (forceBrowser || isBrowserHost(initialUrl)) {
       return this.downloadModInBrowser(
         gameId,
         initialUrl,
@@ -881,12 +1132,18 @@ export class DownloadManager {
         partPath,
         transfer,
         keepInstalledStatus,
+        directFile,
+        queueItemId,
       );
     }
 
     const controller = new AbortController();
     transfer.controller = controller;
     try {
+      if (queueItemId && this.modJobs.get(queueItemId)?.cancelled) {
+        controller.abort();
+        throw new ModCancelledError();
+      }
       let url = resolveDirectUrl(initialUrl);
       let response: Response | undefined;
       for (let redirects = 0; redirects <= 8; redirects += 1) {
@@ -911,6 +1168,7 @@ export class DownloadManager {
       }
       const totalBytes = Number(response.headers.get("content-length")) || null;
       this.database.updateDownload(gameId, { totalBytes });
+      if (queueItemId) this.updateMod(queueItemId, { totalBytes });
       const target = createWriteStream(partPath, { flags: "w" });
       const reader = response.body.getReader();
       let received = 0;
@@ -922,16 +1180,15 @@ export class DownloadManager {
           received += value.byteLength;
           this.database.updateDownload(gameId, { bytesDownloaded: received });
           this.emit(gameId);
+          if (queueItemId) this.updateMod(queueItemId, { bytesDownloaded: received });
         }
       } finally {
         await finishWriteStream(target);
         reader.releaseLock();
       }
       transfer.controller = undefined;
-      if (!directFile && isSupportedArchive(modArchive)) {
-        if (!await archiveHasSupportedSignature(partPath)) {
-          throw new Error(`Downloaded mod "${mod.name}" is not a valid archive.`);
-        }
+      if (!directFile && !await archiveHasSupportedSignature(partPath)) {
+        throw new Error(`Downloaded mod "${mod.name}" is not a valid archive.`);
       }
       await rename(partPath, modArchive);
       return modArchive;
@@ -947,6 +1204,8 @@ export class DownloadManager {
     partPath: string,
     transfer: Transfer,
     keepInstalledStatus: boolean,
+    directFile: boolean,
+    queueItemId?: string,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       const browser = new BrowserWindow({
@@ -993,6 +1252,11 @@ export class DownloadManager {
             phase: "downloading-mod",
           });
           this.emit(gameId);
+          if (queueItemId) this.updateMod(queueItemId, {
+            status: item.isPaused() ? "paused" : "downloading",
+            bytesDownloaded: item.getReceivedBytes(),
+            totalBytes: item.getTotalBytes() || null,
+          });
         });
         item.once("done", (_doneEvent, state) => {
           transfer.item = undefined;
@@ -1003,7 +1267,7 @@ export class DownloadManager {
             return;
           }
           void (async () => {
-            if (isSupportedArchive(modArchive) && !await archiveHasSupportedSignature(partPath)) {
+            if (!directFile && !await archiveHasSupportedSignature(partPath)) {
               throw new Error("Downloaded mod is not a valid archive.");
             }
             await rename(partPath, modArchive);

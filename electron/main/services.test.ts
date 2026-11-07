@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { execFileSync, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
@@ -28,6 +28,7 @@ import {
 } from "./downloads/download-manager";
 import { Launcher } from "./launcher";
 import { LibraryManager } from "./library-manager";
+import { portableUserDataPath } from "./portable-path";
 import { applyModArchive } from "./downloads/mod-installer";
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -62,6 +63,19 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+describe("portable application data", () => {
+  it("uses a Library Data folder beside the portable executable", () => {
+    const executableDirectory = path.join(makeTempDirectory(), "portable");
+    expect(portableUserDataPath(executableDirectory))
+      .toBe(path.join(path.resolve(executableDirectory), "Library Data"));
+  });
+
+  it("keeps the default Electron location outside portable mode", () => {
+    expect(portableUserDataPath(undefined)).toBeUndefined();
+    expect(portableUserDataPath("  ")).toBeUndefined();
+  });
 });
 
 describe("SQLite library", () => {
@@ -539,10 +553,115 @@ describe("download controls", () => {
     await vi.waitFor(() => expect(requests).toHaveLength(2));
     expect(database.getDownload(1)?.status).toBe("downloading");
     await manager.cancel(1);
-    expect(database.getDownload(1)).toBeUndefined();
-    expect(database.listDownloads()).toEqual([]);
+    expect(database.getDownload(1)?.status).toBe("cancelled");
+    expect(manager.listQueue()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "game:1", status: "cancelled" }),
+    ]));
     expect(requests[1]?.aborted).toBe(true);
+    manager.dismissTerminalDownload(1);
+    expect(database.getDownload(1)).toBeUndefined();
+    expect(manager.listQueue()).toEqual([]);
     await new Promise((resolve) => setImmediate(resolve));
+    database.close();
+  });
+
+  it("resumes a partial direct download through redirects without duplicating bytes", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    const source = path.join(root, "source");
+    mkdirSync(installDir);
+    mkdirSync(source);
+    writeFileSync(path.join(source, "game.exe"), "resumed installation");
+    const sourceArchive = path.join(root, "source.zip");
+    execFileSync(path7za, ["a", sourceArchive, "game.exe"], { cwd: source, windowsHide: true });
+    const archiveBytes = await import("node:fs/promises").then(({ readFile }) => readFile(sourceArchive));
+    const offset = Math.max(1, Math.floor(archiveBytes.length / 3));
+    const archivePath = path.join(installDir, "game.zip");
+    writeFileSync(`${archivePath}.part`, archiveBytes.subarray(0, offset));
+    const database = makeDatabase();
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "failed",
+      archivePath,
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    const requests: RequestInit[] = [];
+    vi.stubGlobal("fetch", vi.fn((_url: URL, options?: RequestInit) => {
+      requests.push(options ?? {});
+      if (requests.length === 1) {
+        return Promise.resolve(new Response(null, {
+          status: 302,
+          headers: { location: "https://cdn.example/game.zip" },
+        }));
+      }
+      return Promise.resolve(new Response(archiveBytes.subarray(offset), {
+        status: 206,
+        headers: {
+          "content-type": "application/zip",
+          "content-length": String(archiveBytes.length - offset),
+          "content-range": `bytes ${offset}-${archiveBytes.length - 1}/${archiveBytes.length}`,
+        },
+      }));
+    }));
+    const manager = new DownloadManager(database, new Launcher(database));
+
+    manager.resume(1);
+    await vi.waitFor(
+      () => expect(database.getDownload(1)?.status).toBe("installed"),
+      { timeout: 5000 },
+    );
+
+    expect(requests).toHaveLength(2);
+    expect(new Headers(requests[0].headers).get("range")).toBe(`bytes=${offset}-`);
+    expect(new Headers(requests[1].headers).get("range")).toBe(`bytes=${offset}-`);
+    expect(await import("node:fs/promises").then(({ readFile }) => readFile(archivePath))).toEqual(archiveBytes);
+    database.close();
+  });
+
+  it("restarts a partial direct download when the host ignores the Range header", async () => {
+    const root = makeTempDirectory();
+    const installDir = path.join(root, "Sample Game");
+    const source = path.join(root, "source");
+    mkdirSync(installDir);
+    mkdirSync(source);
+    writeFileSync(path.join(source, "game.exe"), "restarted installation");
+    const sourceArchive = path.join(root, "source.zip");
+    execFileSync(path7za, ["a", sourceArchive, "game.exe"], { cwd: source, windowsHide: true });
+    const archiveBytes = await import("node:fs/promises").then(({ readFile }) => readFile(sourceArchive));
+    const archivePath = path.join(installDir, "game.zip");
+    writeFileSync(`${archivePath}.part`, archiveBytes.subarray(0, 20));
+    const database = makeDatabase();
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "failed",
+      archivePath,
+      installDir,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    let requestOptions: RequestInit | undefined;
+    const fetchMock = vi.fn((_url: URL, options?: RequestInit) => {
+      requestOptions = options;
+      return Promise.resolve(new Response(archiveBytes, {
+        status: 200,
+        headers: { "content-type": "application/zip", "content-length": String(archiveBytes.length) },
+      }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const manager = new DownloadManager(database, new Launcher(database));
+
+    manager.resume(1);
+    await vi.waitFor(
+      () => expect(database.getDownload(1)?.status).toBe("installed"),
+      { timeout: 5000 },
+    );
+
+    expect(new Headers(requestOptions?.headers).get("range")).toBe("bytes=20-");
+    expect(await import("node:fs/promises").then(({ readFile }) => readFile(archivePath))).toEqual(archiveBytes);
     database.close();
   });
 
@@ -566,9 +685,139 @@ describe("download controls", () => {
     const manager = new DownloadManager(database, new Launcher(database));
 
     await expect(manager.cancel(1)).resolves.toBeUndefined();
+    expect(database.getDownload(1)?.status).toBe("cancelled");
+    expect(existsSync(`${archivePath}.part`)).toBe(false);
+    manager.dismissTerminalDownload(1);
     expect(database.getDownload(1)).toBeUndefined();
     expect(database.listDownloads()).toEqual([]);
-    expect(existsSync(`${archivePath}.part`)).toBe(false);
+    database.close();
+  });
+
+  it("clears all cancelled download records", () => {
+    const database = new LibraryDatabase(":memory:");
+    database.seed(JSON.stringify(["First", "Second"].map((name) => ({
+      name,
+      download_links: {},
+      mods: [],
+    }))));
+    for (const game of database.listGames()) {
+      database.saveDownload({
+        gameId: game.id,
+        url: `https://downloads.example/${game.id}.zip`,
+        status: "cancelled",
+        archivePath: `C:\\games\\${game.id}.zip`,
+        installDir: `C:\\games\\${game.id}`,
+        runAfter: false,
+      });
+    }
+    const manager = new DownloadManager(database, new Launcher(database));
+
+    manager.clearTerminalDownloads();
+
+    expect(manager.listQueue()).toEqual([]);
+    expect(database.listDownloads()).toEqual([]);
+    database.close();
+  });
+
+  it("enqueues installed-game mods promptly and continues after a failed mod", async () => {
+    const root = makeTempDirectory();
+    const database = new LibraryDatabase(":memory:");
+    database.seed(JSON.stringify([{
+      name: "Mod Queue Game",
+      download_links: {},
+      mods: [{
+        name: "Broken Fix",
+        asset_type: "file",
+        download_links: { direct_link: "https://downloads.example/broken.dll" },
+        steps_to_apply: [{ type: "move", target_folder: "%GAME_ROOT%/mods" }],
+      }, {
+        name: "Good Fix",
+        asset_type: "file",
+        download_links: { direct_link: "https://downloads.example/good.dll" },
+        steps_to_apply: [{ type: "move", target_folder: "%GAME_ROOT%/mods" }],
+      }],
+    }]));
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "installed",
+      archivePath: path.join(root, "game.zip"),
+      installDir: root,
+      gameRoot: root,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    const manager = new DownloadManager(database, new Launcher(database));
+    vi.stubGlobal("fetch", vi.fn((url: URL) => Promise.resolve(
+      url.pathname.endsWith("broken.dll")
+        ? new Response("failure", { status: 500 })
+        : new Response("working mod", {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        }),
+    )));
+
+    await expect(manager.applyMods(1, [0, 1])).resolves.toBeUndefined();
+    expect(manager.listQueue()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "game:1", kind: "game", status: "completed" }),
+      expect.objectContaining({ id: "mod:1:0", kind: "mod" }),
+      expect.objectContaining({ id: "mod:1:1", kind: "mod" }),
+    ]));
+    await vi.waitFor(() => expect(manager.listQueue()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "mod:1:0", kind: "mod", status: "failed" }),
+      expect.objectContaining({ id: "mod:1:1", kind: "mod", status: "completed" }),
+    ])));
+    expect(database.getDownload(1)?.appliedModIds).toEqual([1]);
+    expect(existsSync(path.join(root, "mods", "Good Fix.dll"))).toBe(true);
+    manager.dismissTerminalDownload(1);
+    expect(manager.listQueue()).toEqual([]);
+    expect(database.getDownload(1)?.status).toBe("installed");
+    database.close();
+  });
+
+  it("cancels waiting and active mod queue items independently", async () => {
+    const root = makeTempDirectory();
+    const database = new LibraryDatabase(":memory:");
+    database.seed(JSON.stringify([{
+      name: "Cancelable Mods",
+      download_links: {},
+      mods: ["First", "Second"].map((name) => ({
+        name,
+        asset_type: "file",
+        download_links: { direct_link: `https://downloads.example/${name.toLowerCase()}.dll` },
+        steps_to_apply: [{ type: "move", target_folder: "%GAME_ROOT%/mods" }],
+      })),
+    }]));
+    database.saveDownload({
+      gameId: 1,
+      url: "https://downloads.example/game.zip",
+      status: "installed",
+      archivePath: path.join(root, "game.zip"),
+      installDir: root,
+      gameRoot: root,
+      runAfter: false,
+      selectedModIds: [],
+    });
+    const manager = new DownloadManager(database, new Launcher(database));
+    vi.stubGlobal("fetch", vi.fn((_url: URL, options?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("Aborted", "AbortError")), { once: true });
+      }),
+    ));
+
+    await manager.applyMods(1, [0, 1]);
+    await vi.waitFor(() => expect(manager.listQueue()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "mod:1:0", status: "downloading" }),
+      expect.objectContaining({ id: "mod:1:1", status: "waiting" }),
+    ])));
+    await manager.cancelModDownload("mod:1:1");
+    await manager.cancelModDownload("mod:1:0");
+    await vi.waitFor(() => expect(manager.isActive(1)).toBe(false));
+    expect(manager.listQueue()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "mod:1:0", status: "cancelled" }),
+      expect.objectContaining({ id: "mod:1:1", status: "cancelled" }),
+    ]));
     database.close();
   });
 
@@ -598,7 +847,7 @@ describe("download controls", () => {
       download_links: { direct_link: "https://downloads.example/base.zip" },
       mods: [{
         name: "Patch",
-        download_links: { direct_link: "https://downloads.example/patch.zip" },
+        download_links: { direct_link: "https://downloads.example/patch.download" },
         steps_to_apply: [{
           type: "move",
           source_folder: "mod/game",
@@ -606,6 +855,7 @@ describe("download controls", () => {
         }],
       }, {
         name: "Direct Fix",
+        asset_type: "file",
         download_links: { direct_link: "https://downloads.example/fix.dll" },
         steps_to_apply: [{
           type: "move",
@@ -615,13 +865,18 @@ describe("download controls", () => {
     }]));
     const manager = new DownloadManager(database, new Launcher(database));
     const observedPhases = new Set<string>();
+    let gameCompletedWhileModDownloading = false;
     manager.onUpdate((update) => {
       if (update.phase) observedPhases.add(update.phase);
+      if (update.kind === "mod" && update.status === "downloading") {
+        gameCompletedWhileModDownloading ||= manager.listQueue().some((item) =>
+          item.kind === "game" && item.status === "completed");
+      }
     });
     const gameBytes = await import("node:fs/promises").then(({ readFile }) => readFile(gameArchive));
     const modBytes = await import("node:fs/promises").then(({ readFile }) => readFile(modArchive));
     vi.stubGlobal("fetch", vi.fn((url: URL) => Promise.resolve(new Response(
-        url.pathname.endsWith("patch.zip") ? modBytes :
+        url.pathname.endsWith("patch.download") ? modBytes :
           url.pathname.endsWith("fix.dll") ? directMod : gameBytes,
         { status: 200, headers: { "content-type": "application/zip" } },
     ))));
@@ -633,7 +888,10 @@ describe("download controls", () => {
       runAfter: false,
       selectedModIds: [0, 1],
     });
-    await vi.waitFor(() => expect(database.getDownload(1)).toMatchObject({ status: "installed" }));
+    await vi.waitFor(
+      () => expect(database.getDownload(1)).toMatchObject({ status: "installed" }),
+      { timeout: 5000 },
+    );
     expect(database.getDownload(1)).toMatchObject({
       gameRoot: path.join(root, "Modded Game"),
       appliedModIds: [0, 1],
@@ -647,6 +905,13 @@ describe("download controls", () => {
       "downloading-mod",
       "applying-mods",
       "finalizing",
+    ]));
+    expect(gameCompletedWhileModDownloading).toBe(true);
+    expect(database.listDownloads()).toEqual([]);
+    expect(manager.listQueue()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "game:1", kind: "game", status: "completed" }),
+      expect.objectContaining({ id: "mod:1:0", kind: "mod", status: "completed" }),
+      expect.objectContaining({ id: "mod:1:1", kind: "mod", status: "completed" }),
     ]));
     const installedRoot = path.join(root, "Modded Game");
     const installedPatch = path.join(installedRoot, "game", "patch.rpy");
@@ -921,6 +1186,58 @@ describe("mod application", () => {
     const { readFile } = await import("node:fs/promises");
     expect(await readFile(path.join(gameRoot, "game", "gui", "base.txt"), "utf8")).toBe("mod override");
     expect(await readFile(path.join(gameRoot, "game", "gui", "new.txt"), "utf8")).toBe("new mod file");
+  });
+
+  it("installs file assets into a folder or an exact nested path", async () => {
+    const root = makeTempDirectory();
+    const gameRoot = path.join(root, "game");
+    const saveFile = path.join(root, "Full Save.save");
+    mkdirSync(gameRoot);
+    writeFileSync(saveFile, "save contents");
+
+    await applyModArchive(saveFile, {
+      name: "Folder Save",
+      asset_type: "file",
+      download_links: { direct_link: "https://downloads.example/save" },
+      steps_to_apply: [{ type: "move", target_folder: "%GAME_ROOT%/folder/saves" }],
+    }, gameRoot, true);
+    await applyModArchive(saveFile, {
+      name: "Exact Save",
+      asset_type: "file",
+      download_links: { direct_link: "https://downloads.example/save" },
+      steps_to_apply: [{
+        type: "move",
+        target_path: "%GAME_ROOT%/game/saves/1-5-LT1.save",
+      }],
+    }, gameRoot, true);
+
+    const { readFile } = await import("node:fs/promises");
+    expect(await readFile(path.join(gameRoot, "folder", "saves", "Full Save.save"), "utf8"))
+      .toBe("save contents");
+    expect(await readFile(path.join(gameRoot, "game", "saves", "1-5-LT1.save"), "utf8"))
+      .toBe("save contents");
+  });
+
+  it("rejects file targets through linked directories", async () => {
+    const root = makeTempDirectory();
+    const gameRoot = path.join(root, "game");
+    const outside = path.join(root, "outside");
+    const saveFile = path.join(root, "save.dat");
+    mkdirSync(gameRoot);
+    mkdirSync(outside);
+    writeFileSync(saveFile, "save contents");
+    symlinkSync(outside, path.join(gameRoot, "linked"), process.platform === "win32" ? "junction" : "dir");
+
+    await expect(applyModArchive(saveFile, {
+      name: "Unsafe Save",
+      asset_type: "file",
+      download_links: { direct_link: "https://downloads.example/save" },
+      steps_to_apply: [{
+        type: "move",
+        target_path: "%GAME_ROOT%/linked/save.dat",
+      }],
+    }, gameRoot, true)).rejects.toThrow(/symbolic link/);
+    expect(existsSync(path.join(outside, "save.dat"))).toBe(false);
   });
 
   it("rejects mod steps that escape the installation directory", async () => {

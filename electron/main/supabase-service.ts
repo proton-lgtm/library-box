@@ -14,15 +14,36 @@ const httpsUrl = z.string().url().refine((value) => {
 const linkRecordSchema = z.record(z.string(), httpsUrl);
 const modStepSchema = z.object({
   type: z.enum(["extract", "move"]),
-  target_folder: z.string(),
+  target_folder: z.string().optional(),
+  target_path: z.string().optional(),
   source_folder: z.string().optional(),
-}).strict();
+}).strict().superRefine((step, context) => {
+  if (step.type === "extract" && (!step.target_folder || step.target_path !== undefined)) {
+    context.addIssue({ code: "custom", message: "Extract steps require only target_folder." });
+  }
+  if (step.type === "move" && Boolean(step.target_folder) === Boolean(step.target_path)) {
+    context.addIssue({ code: "custom", message: "Move steps require exactly one target_folder or target_path." });
+  }
+});
 const modSchema = z.object({
   name: z.string().trim().min(1),
+  asset_type: z.enum(["file", "zip"]).default("zip"),
   download_links: linkRecordSchema,
   steps_to_apply: z.array(modStepSchema).default([]),
-  file_type: z.string().optional(),
-}).strict();
+}).strict().superRefine((mod, context) => {
+  if (mod.asset_type === "file") {
+    const step = mod.steps_to_apply[0];
+    if (mod.steps_to_apply.length !== 1 || step?.type !== "move" || step.source_folder ||
+        Boolean(step.target_folder) === Boolean(step.target_path)) {
+      context.addIssue({
+        code: "custom",
+        message: "File assets require one move step with target_folder or target_path.",
+      });
+    }
+  } else if (mod.steps_to_apply.some((step) => step.target_path)) {
+    context.addIssue({ code: "custom", message: "target_path is only supported for file assets." });
+  }
+});
 const gameDetailsSchema = z.object({
   description: z.string().default(""),
   release_date: z.string().nullable().optional(),
