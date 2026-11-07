@@ -7,8 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to build, for example v0.1.0
+        description: Release tag to create or update, for example v0.1.0
         required: true
+        type: string
+      ref:
+        description: Branch, commit, or existing tag to build
+        required: true
+        default: main
         type: string
 
 permissions:
@@ -26,7 +31,7 @@ jobs:
       - name: Check out release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -72,8 +77,15 @@ jobs:
           } else {
             $env:GITHUB_REF_NAME
           }
-          gh release create $tag "${{ steps.portable.outputs.path }}" `
-            --repo $env:GITHUB_REPOSITORY `
-            --target $env:GITHUB_SHA `
-            --title "Library $tag" `
-            --generate-notes
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag "${{ steps.portable.outputs.path }}" `
+              --repo $env:GITHUB_REPOSITORY `
+              --clobber
+          } else {
+            gh release create $tag "${{ steps.portable.outputs.path }}" `
+              --repo $env:GITHUB_REPOSITORY `
+              --target $env:GITHUB_SHA `
+              --title "Library $tag" `
+              --generate-notes
+          }
