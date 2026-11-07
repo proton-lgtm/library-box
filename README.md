@@ -1,56 +1,75 @@
-# Redline Library
+# Game Library
 
-Redline is a Tauri 2 desktop library for discovering Ren'Py games, tracking verified public archive downloads, installing ZIP builds, and launching/stopping installed games. The catalog and transfer/install state are stored in a local SQLite database under the operating system's app-data directory.
+A cross-platform desktop game library built with Electron, React, TypeScript, and Vite. Supabase is the source of truth for the public game catalog and authentication. SQLite caches catalog data for offline browsing and stores device-local download/install state. The Python CLI in `py_box/` remains available independently.
 
-## Run locally
+The interface follows the supplied game-store references: deep navy surfaces, violet accents, subtle halftone texture, rounded artwork panels, and a compact collection sidebar. It uses the Inter variable font bundled locally with the app, so typography is consistent offline and across platforms.
 
-Install Node.js 20.19+ (or 22.12+) and Rust stable with the platform's native build prerequisites. Then, from the project folder:
+## Recommended stack
+
+| Area | Choice | Why it fits | Main tradeoff |
+|---|---|---|---|
+| Desktop shell | Electron + electron-builder | Mature Windows, macOS, and Linux support; familiar web stack | Larger application packages than native-webview shells |
+| UI | React + TypeScript + Vite | Reuses the existing UI approach, fast development, typed components | Renderer/main process boundaries need deliberate IPC design |
+| Local database | SQLite via better-sqlite3 | Lightweight, transactional, local-first storage | Native addon must be rebuilt and validated for each OS/architecture |
+| Downloads | Node HTTPS streaming + Electron browser flow for GoFile/Workupload | Direct downloads support progress and range-based resume; browser flow handles interactive host pages without a host API | Resume depends on server support; browser-host pages may require user interaction |
+| Archive extraction | Bundled 7-Zip via `7zip-bin` | One extractor supports ZIP, 7z, and RAR across platforms | Binary packaging/licensing and archive safety need attention; RAR support depends on the bundled 7-Zip build |
+| Tests | Vitest + Testing Library | Covers renderer and desktop service logic in the existing test workflow | Native addon and platform-specific process behavior still need OS-specific validation |
+
+## Development
+
+Install Node.js 20.19+ (or 22.12+) and the platform's native build prerequisites for `better-sqlite3`. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` in the ignored `.env.local` file, then run:
 
 ```powershell
 npm install
-npm run tauri dev
+npm run dev
 ```
 
-To run the frontend tests and production web build:
+The Electron main process owns filesystem access, downloads, archive extraction, SQLite, and game launching. Renderer code has no Node integration. A narrow, typed preload API bridges the renderer to validated IPC handlers.
+
+## Tests and builds
 
 ```powershell
+npm run typecheck
 npm test
 npm run build
 ```
 
-To run the Rust/SQLite and archive tests and produce the native package for the current host:
+To reset the app's local Electron storage (SQLite catalog/download records, encrypted auth session, and Chromium cache/storage) without removing installed game folders:
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml
-npm run tauri build
+npm run clear:electron-storage
 ```
 
-For a Windows NSIS installer specifically:
+Close the app first, then type `CLEAR` when prompted. Use `npm run clear:electron-storage -- --dry-run` to inspect the target, or append `-- --yes` to skip confirmation.
+
+Create a packaged application for the current host:
 
 ```powershell
-npm run tauri build -- --bundles nsis
+npm run package:dir
 ```
 
-Tauri desktop build prerequisites:
+Platform package scripts are also available:
 
-- **Windows:** Microsoft C++ Build Tools (MSVC), WebView2 runtime, and the Rust MSVC target.
-- **macOS:** Xcode Command Line Tools and the Rust target for the build architecture.
-- **Linux:** the Tauri v2 GTK/WebKitGTK development packages for the distribution, plus the Rust target.
+```powershell
+npm run package:win
+npm run package:mac
+npm run package:linux
+```
 
-Tauri builds native installers for the host OS; producing Windows, macOS, and Linux packages requires building on each respective platform.
+Build native packages on their target operating system for the most reliable results. macOS signing/notarization requires macOS and Apple developer tooling; this project does not configure signing credentials. Linux package formats may require distribution-specific build dependencies. Windows, macOS, and Linux packages have not all been validated from one machine.
 
 ## Using the library
 
-The home page shows a snapshot of the first ten items in itch.io's **Popular** sort for its Ren'Py collection. Open a title's itch.io page in the system browser from its details; Redline checks the official game page for file names, advertised sizes, platform labels, and upload IDs and caches that metadata in SQLite. The Download action asks for an install folder and whether to launch after install, then follows itch.io's public direct-download sequence: fetch CSRF/cookies, request `/download_url`, inspect the resulting download page for the selected upload, request its short-lived signed archive URL, and stream it. This flow is based on the approach documented by [Wal33D/itchio-downloader](https://github.com/Wal33D/itchio-downloader); Redline implements it in its Rust/Tauri backend rather than embedding that Node package. Downloads supports pause, resume, cancel, progress, and retry; retries negotiate a fresh signed URL. ZIP extraction rejects traversal paths and symbolic links and only marks an install ready when it finds a launcher for the current OS. The Library page can launch and stop installed games.
+Home shows the games fetched from Supabase; the last cached catalog remains available when the service is offline. Selecting a cover opens details and the download flow. Choose an existing destination folder, optionally select catalog mods, and optionally enable auto-run after installation. The game archive and selected mod files are kept in the game folder alongside extracted files. When retrying an install, existing game and mod archives are reused rather than downloaded again. Downloads are available from the left navigation and support pause, resume, and cancel. GoFile and Workupload links open in a dedicated browser window so the user can complete any host-page interaction. Other configured HTTPS links are downloaded directly. The Library page lists installed games and lets the user launch, stop, or delete them. Deletion removes the installed folder, including its kept archives. Missing install folders are reconciled during refresh and removed from the library.
 
-Upload IDs are not treated as direct URLs. itch.io is asked to authorize each selected upload in the same way its public Download button does; files requiring an account, purchase, or other browser interaction are not bypassed and should be opened on itch.io instead. ZIP files labeled for the current OS are offered for installation even when the upload ID only appears on itch.io's follow-up download page; Redline discovers that ID during the official authorization flow. Catalog `download_url` accepts a legacy URL string or a platform map (`pc`/`windows`, `mac`/`macos`, or `linux`), and Redline selects the current build's entry. Public Pixeldrain `/u/` and `/d/` links are normalized to Pixeldrain's file API. Direct HTTPS file URLs on Pixeldrain, GoFile, Datanodes, Uploadhaven, VikingFile, and MixDrop are accepted. Hoster share pages (including MixDrop `/f/` pages and GoFile `/d/` pages) are not direct links; if they return HTML or JSON, Redline reports that a direct link is required. It does not automate ads, countdowns, captchas, sign-in, or paid-download gates.
+### Supabase setup
 
-The UI uses the installed system fonts Segoe UI for general interface text and Bahnschrift for headings; there are no external font downloads.
+Run [`supabase/migrations/20261105000000_catalog.sql`](./supabase/migrations/20261105000000_catalog.sql) in the Supabase SQL editor, then manually populate `games` and its matching `game_details` row. Link objects use JSON objects; `mod_links` is an array of the existing mod objects, including `steps_to_apply`.
 
-## Catalog provenance
+In Supabase Auth, enable new users and anonymous sign-ins, keep email confirmation disabled to avoid requiring email verification, and enable manual identity linking so an anonymous user can be upgraded without changing their user ID. Catalog reads are permitted only to the `authenticated` role; anonymous Auth users receive a JWT with that role. Run any newer SQL migrations in order, including `20261105143500_authenticated_catalog_access.sql` if the original catalog migration was already applied. The desktop app uses only the publishable key and read-only catalog access; never put a service-role key in the app or `.env.local`.
 
-Seed order follows the itch.io `made-with-renpy` **Popular** listing captured on September 30, 2026. This is a snapshot of the site's displayed sort order, not a claimed ranking by sales, downloads, or rating. Cover images are hotlinked from the public itch.io image CDN at the 315×250 listing-thumbnail size; game pages remain the source of truth for availability, platform support, pricing, and creator information. Catalog source data is in `src-tauri/src/catalog.json`.
+ZIP, 7z, and RAR archives are extracted with the bundled 7-Zip executable. Archive paths and links are checked before extraction. Launcher processes are started without a shell.
 
-## Security and platform behavior
+## Security notes
 
-The app requests only native folder selection and external URL opening from Tauri plugins. Game launch uses a selected install's recorded executable directly (not a shell command); extracted links and paths are validated. Stop terminates the launched process and, on Unix, its dedicated process group; on Windows it terminates the launched process. Download requests are restricted to HTTPS itch.io/itch.zone and supported file-host domains, redirects are validated at every hop, and the SQLite database remains local to the user profile.
+Electron windows use context isolation, sandboxing, and disabled Node integration. The preload exposes only the library operations needed by the UI. IPC validates payloads, download URLs are checked against the selected game's catalog links, external links and network redirects must use HTTPS and cannot target localhost, and the download destination must be an existing folder. SQLite data and encrypted auth session data are stored in Electron's per-user application data directory.

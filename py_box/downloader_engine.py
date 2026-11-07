@@ -59,6 +59,10 @@ class DownloaderEngine:
             return 'workupload'
         elif domain == 'gofile.io' or domain.endswith('.gofile.io'):
             return 'gofile'
+        elif domain == 'bzzhr.to' or domain.endswith('.bzzhr.to'):
+            return 'buzzheavier'
+        elif domain == 'buzzheavier.com' or domain.endswith('.buzzheavier.com'):
+            return 'buzzheavier'
         return 'direct'
 
     def _get_pixeldrain_direct_url(self, url: str) -> str:
@@ -88,6 +92,42 @@ class DownloaderEngine:
         """Pass through Workupload links; redirects to file downloads are followed by requests."""
         return url
 
+    def _get_buzzheavier_direct_url(self, url: str) -> str:
+        """Find the ts.bzzhr.to download URL embedded in a Buzzheavier page."""
+        if urlparse(url).hostname == "ts.bzzhr.to":
+            return url
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36"
+                )
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        html = (
+            response.text
+            .replace("&amp;", "&")
+            .replace("\\u0026", "&")
+            .replace("\\/", "/")
+        )
+        match = re.search(
+            r"https://ts\.bzzhr\.to/[^\"'<>\s\\]+",
+            html,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            raise ValueError(
+                "Could not find a Buzzheavier direct download link on the page."
+            )
+        direct_url = match.group(0).rstrip("),;")
+        parsed = urlparse(direct_url)
+        if parsed.scheme != "https" or parsed.hostname != "ts.bzzhr.to":
+            raise ValueError("Buzzheavier returned an unexpected download host.")
+        return direct_url
+
     def _get_direct_download_url(self, url: str, source: str) -> str:
         """Get direct download URL based on source."""
         if source == 'pixeldrain':
@@ -98,6 +138,8 @@ class DownloaderEngine:
             return self._get_patreon_direct_url(url)
         elif source == 'workupload':
             return self._get_workupload_direct_url(url)
+        elif source == 'buzzheavier':
+            return self._get_buzzheavier_direct_url(url)
         return url
 
     @staticmethod
@@ -169,6 +211,7 @@ class DownloaderEngine:
                             "The browser started a download that does not have an "
                             "HTTP(S) URL, so it cannot be streamed by the installer."
                         )
+                    print(f"Captured direct download URL: {download_url}")
                     cookies = page.context.cookies([download_url])
                     user_agent = page.evaluate("navigator.userAgent")
                     referer = page.url

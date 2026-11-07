@@ -1,0 +1,5 @@
+- [x] Keep download and completion status visible on the Downloads page for the app session
+- [x] Show mod download and application progress on the Downloads page
+- [x] Open game details from the Library menu
+- [x] Allow choosing among multiple download providers and remember the preferred provider locally
+- [] Progress bar for extracting as well

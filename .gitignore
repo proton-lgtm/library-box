@@ -1,6 +1,10 @@
 build
 node_modules
 dist
-src-tauri/target
 target
 __pycache__
+out
+release
+references
+.env*
+.temp

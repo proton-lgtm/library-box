@@ -2,10 +2,38 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run Redline Library (Tauri)",
+      "name": "Run (Electron)",
       "type": "node-terminal",
       "request": "launch",
-      "command": "npm run tauri -- dev"
+      "command": "npm run dev"
+    },
+    {
+      "name": "Run (Electron with inspector)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev -- --inspect=5858 --sourcemap"
+    },
+    {
+      "name": "Attach to Electron main",
+      "type": "node",
+      "request": "attach",
+      "port": 5858,
+      "restart": true,
+      "sourceMaps": true,
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/**",
+        "!**/node_modules/**"
+      ]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Debug Electron downloads",
+      "configurations": [
+        "Run (Electron with inspector)",
+        "Attach to Electron main"
+      ],
+      "stopAll": true
     }
   ]
 }

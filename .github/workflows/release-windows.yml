@@ -1,0 +1,79 @@
+name: Release Windows portable app
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build portable executable
+        run: npm run package:win
+
+      - name: Locate portable executable
+        id: portable
+        shell: pwsh
+        run: |
+          $artifact = Get-ChildItem release -Filter "Library-*-portable.exe" -File
+          if ($artifact.Count -ne 1) {
+            throw "Expected exactly one portable executable, found $($artifact.Count)."
+          }
+          "path=$($artifact.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($artifact.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.portable.outputs.name }}
+          path: ${{ steps.portable.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_TAG: ${{ inputs.tag }}
+        run: |
+          $tag = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $env:MANUAL_TAG
+          } else {
+            $env:GITHUB_REF_NAME
+          }
+          gh release create $tag "${{ steps.portable.outputs.path }}" `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA `
+            --title "Library $tag" `
+            --generate-notes

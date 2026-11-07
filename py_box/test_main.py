@@ -119,6 +119,64 @@ class ArchiveExtractionTests(unittest.TestCase):
             "gofile",
         )
 
+    def test_detects_buzzheavier_short_and_final_links(self):
+        downloader = DownloaderEngine(".")
+
+        self.assertEqual(
+            downloader._detect_source("https://bzzhr.to/und5pmrgbz5r"),
+            "buzzheavier",
+        )
+        self.assertEqual(
+            downloader._detect_source("https://www.buzzheavier.com/file/example"),
+            "buzzheavier",
+        )
+
+    def test_buzzheavier_uses_embedded_direct_download_url(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            downloader = DownloaderEngine(temporary_directory)
+            destination = Path(temporary_directory) / "game.zip"
+
+            with patch.object(
+                downloader,
+                "_get_buzzheavier_direct_url",
+                return_value="https://ts.bzzhr.to/file/game.zip",
+            ) as find_direct_url, patch.object(
+                downloader, "_download_direct_file"
+            ) as stream_file, patch.object(
+                downloader, "_download_browser_host"
+            ) as browser:
+                downloaded = downloader.download_file(
+                    "https://bzzhr.to/und5pmrgbz5r",
+                    destination,
+                    item_name="Game",
+                )
+
+            self.assertTrue(downloaded)
+            find_direct_url.assert_called_once_with(
+                "https://bzzhr.to/und5pmrgbz5r"
+            )
+            stream_file.assert_called_once_with(
+                "https://ts.bzzhr.to/file/game.zip", destination, None, "Game"
+            )
+            browser.assert_not_called()
+
+    def test_extracts_buzzheavier_direct_url_from_page_html(self):
+        downloader = DownloaderEngine(".")
+        response = MagicMock()
+        response.text = (
+            '<a href="https://ts.bzzhr.to/file/game.zip?token=one&amp;expires=two">'
+        )
+
+        with patch("downloader_engine.requests.get", return_value=response):
+            direct_url = downloader._get_buzzheavier_direct_url(
+                "https://bzzhr.to/und5pmrgbz5r"
+            )
+
+        self.assertEqual(
+            direct_url,
+            "https://ts.bzzhr.to/file/game.zip?token=one&expires=two",
+        )
+
     def test_gofile_uses_browser_without_api(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             downloader = DownloaderEngine(temporary_directory)
@@ -212,8 +270,10 @@ class ArchiveExtractionTests(unittest.TestCase):
             session.__exit__.return_value = None
             session.get.return_value = response
 
+            output = io.StringIO()
             with patch.dict("sys.modules", {"playwright.sync_api": playwright_module}), \
-                    patch("downloader_engine.requests.Session", return_value=session):
+                    patch("downloader_engine.requests.Session", return_value=session), \
+                    contextlib.redirect_stdout(output):
                 downloader._download_browser_host(
                     "https://workupload.com/file/example",
                     destination,
@@ -223,6 +283,10 @@ class ArchiveExtractionTests(unittest.TestCase):
 
             self.assertEqual(destination.read_bytes(), b"archive")
             self.assertEqual(progress, [(7, 7)])
+            self.assertIn(
+                "Captured direct download URL: https://download.workupload.com/file/archive",
+                output.getvalue(),
+            )
             download.cancel.assert_called_once()
             session.cookies.set.assert_called_once_with(
                 "session",
