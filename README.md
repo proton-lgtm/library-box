@@ -28,11 +28,23 @@ The Electron main process owns filesystem access, downloads, archive extraction,
 
 ## Tests and builds
 
+Run the automated checks:
+
 ```powershell
 npm run typecheck
 npm test
 npm run build
 ```
+
+### Electron smoke testing
+
+Use the `electron-tester` custom agent for interactive renderer smoke tests. Start the app with both the Node inspector and a renderer DevTools port:
+
+```powershell
+npm run dev -- --inspect=5858 --remote-debugging-port=9222 --sourcemap
+```
+
+Port `5858` is for attaching a Node debugger. Use port `9222` with Electron Debug MCP to inspect the renderer, navigate by accessible page controls, check console/network failures, and capture screenshots. Test at least Home, Downloads, Library, and Profile. Save screenshots or the generated HTML report under `test-artifacts/`; that folder is intentionally ignored by Git.
 
 To reset the app's local Electron storage (SQLite catalog/download records, encrypted auth session, and Chromium cache/storage) without removing installed game folders:
 

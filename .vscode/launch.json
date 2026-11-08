@@ -2,16 +2,10 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run (Electron)",
+      "name": "Run Electron with MCP debugging",
       "type": "node-terminal",
       "request": "launch",
-      "command": "npm run dev"
-    },
-    {
-      "name": "Run (Electron with inspector)",
-      "type": "node-terminal",
-      "request": "launch",
-      "command": "npm run dev -- --inspect=5858 --sourcemap"
+      "command": "npm run dev -- --inspect=5858 --remote-debugging-port=9222 --sourcemap"
     },
     {
       "name": "Attach to Electron main",
@@ -30,7 +24,7 @@
     {
       "name": "Debug Electron downloads",
       "configurations": [
-        "Run (Electron with inspector)",
+        "Run Electron with MCP debugging",
         "Attach to Electron main"
       ],
       "stopAll": true

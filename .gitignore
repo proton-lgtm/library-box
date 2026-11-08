@@ -8,3 +8,4 @@ release
 references
 .env*
 .temp
+test-artifacts/
