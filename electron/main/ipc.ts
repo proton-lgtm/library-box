@@ -43,7 +43,7 @@ export function registerIpc(
       return handler(...args);
     });
   };
-  handle("library:list-games", () => database.listGames());
+  handle("library:list-games", () => database.listGames(new Set([...launcher.runningIds(), ...downloads.activeGameIds()])));
   handle("library:refresh-catalog", () => supabase.refreshCatalog());
   handle("library:get-auth-state", () => supabase.getAuthState());
   handle("library:sign-in", (input) => supabase.signIn(authCredentialsSchema.parse(input)));
@@ -54,7 +54,9 @@ export function registerIpc(
     await shell.openExternal(url);
   });
   handle("library:list-downloads", () => downloads.listQueue());
-  handle("library:list-library", () => database.listLibrary(launcher.runningIds()));
+  handle("library:list-library", () => database.listLibrary(launcher.runningIds(), downloads.activeGameIds()));
+  handle("library:reverify-local-games", () => downloads.reverifyLocalGames());
+  handle("library:remove-all-mods", (gameId) => downloads.removeAllMods(gameIdSchema.parse(gameId)));
   handle("library:choose-destination", async () => {
     const window = getWindow();
     const options: OpenDialogOptions = {
@@ -88,12 +90,17 @@ export function registerIpc(
     const parsed = applyModsSchema.parse({ gameId, modIds });
     return downloads.applyMods(parsed.gameId, parsed.modIds);
   });
-  handle("library:launch-game", (gameId) => launcher.launch(gameIdSchema.parse(gameId)));
+  handle("library:launch-game", (gameId) => {
+    const parsed = gameIdSchema.parse(gameId);
+    return downloads.runExclusive(parsed, () => launcher.launch(parsed));
+  });
   handle("library:stop-game", (gameId) => launcher.stop(gameIdSchema.parse(gameId)));
   handle("library:delete-game", async (gameId) => {
     const parsed = gameIdSchema.parse(gameId);
-    await library.deleteGame(parsed);
-    downloads.removeGameQueueHistory(parsed);
+    await downloads.runExclusive(parsed, async () => {
+      await library.deleteGame(parsed);
+      downloads.removeGameQueueHistory(parsed);
+    });
   });
   handle("library:minimize-window", () => {
     const window = getWindow();

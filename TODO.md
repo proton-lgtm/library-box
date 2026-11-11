@@ -2,6 +2,6 @@
 - [x] Show mod download and application progress on the Downloads page
 - [x] Open game details from the Library menu
 - [x] Allow choosing among multiple download providers and remember the preferred provider locally
-- [] Progress bar for extracting game or mod as well
-- [] Reload button on each screen (home and game details page, refetch data from the database, while the downloads and library page, reverify whether the game folder exists and its content still exists, otheriwse they remove it)
-- [] On the apply mods popup, Add a button on left of the apply called "Remove all mods", which essentially empties the game root folder, except the game zip and re extracts it.
+- [x] Show extraction progress for games and mods, with indeterminate progress when unavailable.
+- [x] Add Reload to each screen: refetch catalog data on Home/Details and reverify local folders/content on Downloads/Library, removing stale records without deleting files.
+- [x] Add "Remove all mods" to the left of Apply mods, with confirmation, archive verification, safe restoration, progress, and success/error states. Preserve the original game archive and clear applied mod selections after success.

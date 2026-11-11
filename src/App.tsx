@@ -31,6 +31,8 @@ function App() {
   const [busy, setBusy] = useState(true);
   const [starting, setStarting] = useState(false);
   const [applyingMods, setApplyingMods] = useState(false);
+  const [resettingMods, setResettingMods] = useState(false);
+  const [localRefreshing, setLocalRefreshing] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [error, setError] = useState("");
   const [catalogStale, setCatalogStale] = useState(false);
@@ -209,6 +211,32 @@ function App() {
     }
   };
 
+  const reloadLocalGames = async () => {
+    if (localRefreshing) return;
+    setLocalRefreshing(true);
+    try {
+      await window.library.reverifyLocalGames();
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setLocalRefreshing(false);
+    }
+  };
+
+  const removeAllMods = async () => {
+    if (!modsTarget || resettingMods || applyingMods) return;
+    setResettingMods(true);
+    try {
+      await window.library.removeAllMods(modsTarget.id);
+      const installed = await window.library.listLibrary();
+      setModsTarget(installed.find((game) => game.id === modsTarget.id) ?? null);
+      await refresh();
+    } finally {
+      setResettingMods(false);
+    }
+  };
+
   const toggleMaximize = async () => {
     try {
       setMaximized(await window.library.toggleMaximizeWindow());
@@ -277,12 +305,16 @@ function App() {
             if (selectedInstalledGame) setModsTarget(selectedInstalledGame);
           }}
           onOpenExternal={openExternal}
+          onReload={() => void refreshCatalog()}
+          reloading={catalogRefreshing}
         />
       ) : page === "home" ? (
-        <HomePage games={filteredGames} onSelect={setSelected} />
+        <HomePage games={filteredGames} onSelect={setSelected} onReload={() => void refreshCatalog()} reloading={catalogRefreshing} />
       ) : page === "downloads" ? (
         <DownloadsPage
           downloads={downloads}
+          onReload={() => void reloadLocalGames()}
+          reloading={localRefreshing}
           onPause={(gameId) => void runAction(() => window.library.pauseDownload(gameId))}
           onResume={(gameId) => void runAction(() => window.library.resumeDownload(gameId))}
           onManual={(gameId) => void runAction(() => window.library.manualDownload(gameId))}
@@ -308,6 +340,8 @@ function App() {
       ) : (
         <LibraryPage
           installed={library}
+          onReload={() => void reloadLocalGames()}
+          reloading={localRefreshing}
           search={search}
           onLaunch={(gameId) => void runAction(() => window.library.launchGame(gameId))}
           onStop={(gameId) => void runAction(() => window.library.stopGame(gameId))}
@@ -349,9 +383,12 @@ function App() {
           key={modsTarget.id}
           game={modsTarget}
           applying={applyingMods}
+          resetting={resettingMods}
+          resetProgress={downloads.find((item) => item.kind === "game" && item.gameId === modsTarget.id)}
+          onRemoveAll={removeAllMods}
           onApply={applyMods}
           onClose={() => {
-            if (!applyingMods) setModsTarget(null);
+            if (!applyingMods && !resettingMods) setModsTarget(null);
           }}
         />
       )}

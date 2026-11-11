@@ -1,9 +1,10 @@
 import { ArrowDownToLine, ArrowLeft, CalendarDays, ExternalLink, Globe2, Layers3, Play, Puzzle, RefreshCw, ShieldCheck } from "lucide-react";
 import type { Game } from "../shared/types";
 import { Cover } from "./Cover";
+import { ReloadButton, type ReloadProps } from "./ReloadButton";
 import { bestDownloadLink, displayLabel, formatBytes, formatDate } from "./format";
 
-interface GameDetailsPageProps {
+interface GameDetailsPageProps extends ReloadProps {
   game: Game;
   installed: boolean;
   downloading: boolean;
@@ -25,12 +26,17 @@ export function GameDetailsPage({
   onLaunch,
   onApplyMods,
   onOpenExternal,
+  onReload,
+  reloading,
 }: GameDetailsPageProps) {
   const mainDownload = bestDownloadLink(game);
 
   return (
     <section className="detail-page">
-      <button className="back-link" onClick={onBack}><ArrowLeft size={18} /> Back</button>
+      <div className="detail-navigation-row">
+        <button className="back-link" onClick={onBack}><ArrowLeft size={18} /> Back</button>
+        <ReloadButton onReload={onReload} reloading={reloading} />
+      </div>
       <div className="detail-layout">
         <div className="detail-art"><Cover game={game} /></div>
         <div className="detail-info">
