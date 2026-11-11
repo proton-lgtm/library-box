@@ -4,6 +4,10 @@ A cross-platform desktop game library built with Electron, React, TypeScript, an
 
 The interface follows the supplied game-store references: deep navy surfaces, violet accents, subtle halftone texture, rounded artwork panels, and a compact collection sidebar. It uses the Inter variable font bundled locally with the app, so typography is consistent offline and across platforms.
 
+## Email waitlist website
+
+The independent [signup website](./signup-website/README.md) is a Vercel-ready Next.js app that collects email waitlist registrations in Supabase with consent and Turnstile verification. See its README for local development, database migration and manual deployment instructions. It does not create user accounts or change the Electron app.
+
 ## Recommended stack
 
 | Area | Choice | Why it fits | Main tradeoff |
@@ -67,6 +71,8 @@ npm run package:win
 npm run package:mac
 npm run package:linux
 ```
+
+The Windows release workflow uses the GitHub Actions `prod` environment. Configure its `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` secrets before publishing a release; the packaging step validates their presence and embeds these public client settings during the build. Never use a service-role/secret key for the desktop app.
 
 Build native packages on their target operating system for the most reliable results. macOS signing/notarization requires macOS and Apple developer tooling; this project does not configure signing credentials. Linux package formats may require distribution-specific build dependencies. Windows, macOS, and Linux packages have not all been validated from one machine.
 
