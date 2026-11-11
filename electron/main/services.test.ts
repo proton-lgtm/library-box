@@ -57,9 +57,11 @@ function makeDatabase(): LibraryDatabase {
   return database;
 }
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  vi.mocked(spawn).mockImplementation(actual.spawn);
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }

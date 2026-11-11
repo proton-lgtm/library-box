@@ -78,6 +78,8 @@ beforeEach(() => {
     cancelModDownload: vi.fn().mockResolvedValue(undefined),
     retryModDownload: vi.fn().mockResolvedValue(undefined),
     applyMods: vi.fn().mockResolvedValue(undefined),
+    removeAllMods: vi.fn().mockResolvedValue(undefined),
+    reverifyLocalGames: vi.fn().mockResolvedValue(undefined),
     launchGame: vi.fn().mockResolvedValue(undefined),
     stopGame: vi.fn().mockResolvedValue(undefined),
     deleteGame: vi.fn().mockResolvedValue(undefined),
@@ -356,7 +358,7 @@ describe("Electron game library UI", () => {
     const appliedCheckbox = screen.getByRole("checkbox", { name: /Applied Patch/ });
     expect((appliedCheckbox as HTMLInputElement).checked).toBe(true);
     expect((appliedCheckbox as HTMLInputElement).disabled).toBe(true);
-    expect(screen.queryByRole("button", { name: "Apply mods" })).toBeNull();
+    expect((screen.getByRole("button", { name: "Apply mods" }) as HTMLButtonElement).disabled).toBe(true);
     await user.click(screen.getByRole("checkbox", { name: /Optional Patch/ }));
     await user.click(screen.getByRole("button", { name: "Apply mods" }));
     await waitFor(() => expect(api.applyMods).toHaveBeenCalledWith(1, [1]));
@@ -549,5 +551,69 @@ describe("Electron game library UI", () => {
     );
     expect(screen.getByText("Less than a minute remaining")).toBeTruthy();
     now.mockRestore();
+  });
+});
+
+
+describe("page reload controls", () => {
+  it("refetches catalog data from Home and game details", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Games" });
+    await waitFor(() => expect((screen.getByRole("button", { name: "Reload page" }) as HTMLButtonElement).disabled).toBe(false));
+    const initial = vi.mocked(api.refreshCatalog).mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Reload page" }));
+    await waitFor(() => expect(api.refreshCatalog).toHaveBeenCalledTimes(initial + 1));
+    await user.click(container.querySelector(".game-card") as HTMLButtonElement);
+    await user.click(screen.getByRole("button", { name: "Reload page" }));
+    await waitFor(() => expect(api.refreshCatalog).toHaveBeenCalledTimes(initial + 2));
+  });
+
+  it("reverifies local records from Downloads and Library without deleting game files", async () => {
+    const user = userEvent.setup();
+    installed = [{ ...game, installDir: "C:\\Games\\Sample", gameRoot: "C:\\Games\\Sample", appliedModIds: [], running: false }];
+    api.reverifyLocalGames = vi.fn().mockImplementation(async () => { installed = []; });
+    render(<App />);
+    await screen.findByRole("heading", { name: "Games" });
+    await user.click(screen.getByRole("button", { name: "Library" }));
+    expect(screen.getByText("Installed", { selector: ".installed-state" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Reload page" }));
+    expect(await screen.findByText("No installed games")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Downloads" }));
+    await user.click(screen.getByRole("button", { name: "Reload page" }));
+    await waitFor(() => expect(api.reverifyLocalGames).toHaveBeenCalledTimes(2));
+    expect(api.deleteGame).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("mod restoration integration", () => {
+  it("restores the selected installed game and reloads cleared applied mods", async () => {
+    installed = [{ ...game, installDir: "C:\\Games\\Sample", gameRoot: "C:\\Games\\Sample", running: false, appliedModIds: [0], mods: [{ name: "Applied Patch", download_links: { direct: "https://example.com/mod.zip" }, steps_to_apply: [] }] }];
+    api.removeAllMods = vi.fn().mockImplementation(async () => { installed = installed.map((item) => ({ ...item, appliedModIds: [] })); });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Library" }));
+    await user.click(await screen.findByLabelText("More options for Sample Game"));
+    await user.click(screen.getByRole("menuitem", { name: "Mods" }));
+    await user.click(screen.getByRole("button", { name: "Remove all mods" }));
+    await user.click(screen.getByRole("button", { name: "Remove all mods" }));
+    expect(await screen.findByRole("heading", { name: "All mods removed" })).toBeTruthy();
+    expect(api.removeAllMods).toHaveBeenCalledWith(1);
+    await user.click(screen.getByRole("button", { name: "Back to mods" }));
+    const checkbox = screen.getByRole("checkbox", { name: "Applied Patch" }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+    expect(api.deleteGame).not.toHaveBeenCalled();
+  });
+
+  it("reports local verification errors and re-enables reload", async () => {
+    api.reverifyLocalGames = vi.fn().mockRejectedValue(new Error("Cannot read game folder."));
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Downloads" }));
+    await user.click(screen.getByRole("button", { name: "Reload page" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Cannot read game folder.");
+    expect((screen.getByRole("button", { name: "Reload page" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

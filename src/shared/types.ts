@@ -83,6 +83,7 @@ export interface GameDownloadRecord {
   installDir: string;
   phase?: DownloadPhase | null;
   phaseDetail?: string | null;
+  extractionProgress?: number | null;
 }
 
 interface DownloadQueueItemBase {
@@ -97,6 +98,7 @@ interface DownloadQueueItemBase {
   phase: DownloadPhase | null;
   detail: string | null;
   phaseDetail: string | null;
+  extractionProgress?: number | null;
   installDir: string;
 }
 
@@ -131,6 +133,7 @@ export interface Download {
   phase?: DownloadPhase | null;
   detail?: string | null;
   phaseDetail?: string | null;
+  extractionProgress?: number | null;
 }
 
 export interface InstalledGame extends Game {
@@ -160,6 +163,9 @@ export interface DesktopApi {
   openExternal(url: string): Promise<void>;
   listDownloads(): Promise<DownloadQueueItem[]>;
   listLibrary(): Promise<InstalledGame[]>;
+  reverifyLocalGames(): Promise<void>;
+  /** Restores the original archive, removing added files including local saves. */
+  removeAllMods(gameId: number): Promise<void>;
   chooseDestination(): Promise<string | null>;
   startDownload(input: StartDownloadInput): Promise<void>;
   pauseDownload(gameId: number): Promise<void>;

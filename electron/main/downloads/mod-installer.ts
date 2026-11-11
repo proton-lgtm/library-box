@@ -1,6 +1,6 @@
 import { cp, lstat, mkdir, readdir, rm, rmdir } from "node:fs/promises";
 import path from "node:path";
-import { extractArchive, isSupportedArchive } from "../archive";
+import { extractArchive, isSupportedArchive, type ExtractionProgressListener } from "../archive";
 import type { GameMod } from "../../../src/shared/types";
 
 function resolveInside(base: string, value: string, gameRoot?: string): string {
@@ -76,13 +76,14 @@ export async function applyModArchive(
   mod: GameMod,
   gameRoot: string,
   directFile = false,
+  onProgress?: ExtractionProgressListener,
 ): Promise<void> {
   const safeRoot = path.resolve(gameRoot);
   const workDir = path.join(path.dirname(archivePath), `extract-${path.basename(archivePath)}-${Date.now()}`);
   await mkdir(workDir, { recursive: true });
   try {
     if (!directFile) {
-      await extractArchive(archivePath, workDir);
+      await extractArchive(archivePath, workDir, onProgress);
       for (const step of mod.steps_to_apply) {
         if (step.type === "extract") {
           if (!step.target_folder) throw new Error("Extract steps require target_folder.");
@@ -90,7 +91,7 @@ export async function applyModArchive(
           await rejectLinkedTargetPath(safeRoot, target);
           await mkdir(target, { recursive: true });
           for (const nestedArchive of await findArchives(workDir)) {
-            await extractArchive(nestedArchive, target);
+            await extractArchive(nestedArchive, target, onProgress);
           }
           continue;
         }

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Pause, Play, Trash2, X } from "lucide-react";
 import type { DownloadQueueItem, GameDownloadQueueItem, ModDownloadQueueItem } from "../shared/types";
 import { Cover } from "./Cover";
+import { QueueProgress } from "./QueueProgress";
+import { ReloadButton, type ReloadProps } from "./ReloadButton";
 import { asGameCover, formatBytes } from "./format";
 
 interface DownloadSample {
@@ -10,7 +12,7 @@ interface DownloadSample {
   phase: DownloadQueueItem["phase"];
 }
 
-interface DownloadsPageProps {
+interface DownloadsPageProps extends ReloadProps {
   downloads: DownloadQueueItem[];
   onPause: (gameId: number) => void;
   onResume: (gameId: number) => void;
@@ -34,6 +36,8 @@ export function DownloadsPage({
   onGoToLibrary,
   onDismiss,
   onClearFinished,
+  onReload,
+  reloading,
 }: DownloadsPageProps) {
   const samples = useRef(new Map<string, DownloadSample>());
   const [remainingSeconds, setRemainingSeconds] = useState<Record<string, number>>({});
@@ -116,7 +120,10 @@ export function DownloadsPage({
 
   return (
     <section className="list-page downloads-page">
-      <h1 className="page-heading">Downloads</h1>
+      <div className="page-heading-row">
+        <h1 className="page-heading">Downloads</h1>
+        <ReloadButton onReload={onReload} reloading={reloading} />
+      </div>
 
       <section className="download-section">
         <div className="section-heading">
@@ -132,10 +139,6 @@ export function DownloadsPage({
               const totalBytes = game.totalBytes ?? game.expectedBytes;
               const isProcessing = game.status === "applying" ||
                 game.phase === "extracting" || game.phase === "finalizing";
-              const progress = game.status === "completed" ? 100
-                : isProcessing ? 100
-                  : totalBytes ? Math.min(100, game.bytesDownloaded / totalBytes * 100)
-                    : game.status === "downloading" ? 40 : 0;
               const eta = remainingSeconds[game.id];
               const expanded = expandedGames.has(game.gameId);
               const dismissible = isDismissibleGroup(game, mods);
@@ -150,7 +153,7 @@ export function DownloadsPage({
                       </div>
                       <span className="download-measure">
                         {queueDetail(game, totalBytes, false)}
-                        {!game.error && game.status === "downloading" && (
+                        {!game.error && game.status === "downloading" && !isProcessing && (
                           <span className="download-eta">
                             {eta
                               ? `${formatRemainingTime(eta)} remaining`
@@ -158,9 +161,7 @@ export function DownloadsPage({
                           </span>
                         )}
                       </span>
-                      <div className={`progress-track${isProcessing ? " progress-processing" : ""}`} role="progressbar" aria-label={`${game.gameName} progress`} aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
-                        <i style={{ width: `${progress}%` }} />
-                      </div>
+                      <QueueProgress download={game} label={`${game.gameName} progress`} />
                     </div>
                     <div className="download-actions">
                       {mods.length > 0 && (
@@ -200,10 +201,6 @@ export function DownloadsPage({
                     <div className="mod-queue-list" id={`mods-${game.gameId}`}>
                       {mods.map((mod) => {
                         const modTotal = mod.totalBytes;
-                        const modProcessing = mod.status === "applying";
-                        const modProgress = mod.status === "completed" || modProcessing ? 100
-                          : modTotal ? Math.min(100, mod.bytesDownloaded / modTotal * 100)
-                            : mod.status === "downloading" ? 40 : 0;
                         const waitingForGame = mod.status === "waiting" && game.status !== "completed";
                         const modEta = remainingSeconds[mod.id];
                         return (
@@ -221,9 +218,7 @@ export function DownloadsPage({
                                   </span>
                                 )}
                               </span>
-                              <div className={`progress-track${modProcessing ? " progress-processing" : ""}`} role="progressbar" aria-label={`${mod.modName} progress`} aria-valuenow={modProgress} aria-valuemin={0} aria-valuemax={100}>
-                                <i style={{ width: `${modProgress}%` }} />
-                              </div>
+                              <QueueProgress download={mod} label={`${mod.modName} progress`} />
                             </div>
                             <div className="download-actions">
                               {mod.status === "failed" && (
@@ -290,10 +285,10 @@ function groupQueueItems(downloads: DownloadQueueItem[]): Array<{
 }
 
 function queueStatusLabel(download: DownloadQueueItem): string {
-  if (download.status === "applying") return "Applying";
   if (download.status === "completed") return download.kind === "mod" ? "Applied" : "Downloaded";
-  if (download.phase === "extracting") return "Extracting";
-  if (download.phase === "finalizing") return "Finishing up";
+  if (download.phase === "extracting" && ["applying", "downloading"].includes(download.status)) return "Extracting";
+  if (download.status === "applying") return "Applying";
+  if (download.phase === "finalizing" && download.status === "downloading") return "Finishing up";
   return download.status[0].toUpperCase() + download.status.slice(1);
 }
 

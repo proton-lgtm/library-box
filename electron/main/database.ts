@@ -108,6 +108,9 @@ export class LibraryDatabase {
     if (!downloadColumns.some((column) => column.name === "phase_detail")) {
       this.db.exec("ALTER TABLE downloads ADD COLUMN phase_detail TEXT");
     }
+    if (!downloadColumns.some((column) => column.name === "extraction_progress")) {
+      this.db.exec("ALTER TABLE downloads ADD COLUMN extraction_progress REAL");
+    }
     if (!downloadColumns.some((column) => column.name === "game_root")) {
       this.db.exec("ALTER TABLE downloads ADD COLUMN game_root TEXT");
     }
@@ -254,8 +257,8 @@ export class LibraryDatabase {
     return state?.value ?? null;
   }
 
-  listGames(): Game[] {
-    this.reconcileMissingInstallations();
+  listGames(protectedIds: ReadonlySet<number> = new Set()): Game[] {
+    this.reconcileMissingInstallations(protectedIds);
     return this.db.prepare(`
       SELECT g.*, d.install_dir AS installDir
       FROM games g LEFT JOIN downloads d
@@ -276,15 +279,15 @@ export class LibraryDatabase {
         d.status, d.bytes_downloaded AS bytesDownloaded,
         d.total_bytes AS totalBytes, g.size_bytes AS expectedBytes,
         d.error, d.install_dir AS installDir,
-        d.phase, d.phase_detail AS phaseDetail
+        d.phase, d.phase_detail AS phaseDetail, d.extraction_progress AS extractionProgress
       FROM downloads d JOIN games g ON g.id=d.game_id
       WHERE d.status != 'installed'
       ORDER BY d.updated_at DESC
     `).all() as GameDownloadRecord[];
   }
 
-  listLibrary(runningIds: ReadonlySet<number> = new Set()): InstalledGame[] {
-    this.reconcileMissingInstallations();
+  listLibrary(runningIds: ReadonlySet<number> = new Set(), activeIds: ReadonlySet<number> = new Set()): InstalledGame[] {
+    this.reconcileMissingInstallations(new Set([...runningIds, ...activeIds]));
     const installed = this.db.prepare(`
       SELECT g.*, d.install_dir AS installDir,
         d.game_root AS gameRoot, d.applied_mods AS appliedMods
@@ -317,11 +320,21 @@ export class LibraryDatabase {
     if (result.changes !== 1) throw new Error("Cancelled download was not found.");
   }
 
-  private reconcileMissingInstallations(): void {
+  listLocalGameIds(): number[] {
+    return (this.db.prepare("SELECT game_id AS gameId FROM downloads").all() as Array<{ gameId: number }>)
+      .map((row) => row.gameId);
+  }
+
+  removeInactiveDownload(gameId: number): void {
+    this.db.prepare("DELETE FROM downloads WHERE game_id=? AND status NOT IN ('downloading','paused')").run(gameId);
+  }
+
+  private reconcileMissingInstallations(protectedIds: ReadonlySet<number> = new Set()): void {
     const installed = this.db.prepare(
-      "SELECT game_id AS gameId, install_dir AS installDir FROM downloads WHERE status='installed'",
+      "SELECT game_id AS gameId, install_dir AS installDir FROM downloads WHERE status='installed' AND phase IS NULL",
     ).all() as Array<{ gameId: number; installDir: string }>;
     for (const game of installed) {
+      if (protectedIds.has(game.gameId)) continue;
       try {
         if (!statSync(game.installDir).isDirectory()) this.removeInstalledGame(game.gameId);
       } catch (error) {
@@ -347,7 +360,7 @@ export class LibraryDatabase {
       SELECT d.game_id AS gameId, g.name AS gameName, g.thumbnail,
         d.status, d.bytes_downloaded AS bytesDownloaded,
         d.total_bytes AS totalBytes, d.error, d.install_dir AS installDir,
-        d.phase, d.phase_detail AS phaseDetail,
+        d.phase, d.phase_detail AS phaseDetail, d.extraction_progress AS extractionProgress,
         d.archive_path AS archivePath, d.url, d.run_after AS runAfter,
         d.selected_mods AS selectedMods, d.game_root AS gameRoot,
         d.applied_mods AS appliedMods
@@ -389,11 +402,12 @@ export class LibraryDatabase {
     error?: string | null;
     phase?: DownloadPhase | null;
     phaseDetail?: string | null;
+    extractionProgress?: number | null;
   }): void {
     this.db.prepare(`
       INSERT INTO downloads
-        (game_id,url,status,bytes_downloaded,total_bytes,phase,phase_detail,archive_path,install_dir,game_root,run_after,selected_mods,applied_mods,error,updated_at)
-      VALUES (@gameId,@url,@status,@bytesDownloaded,@totalBytes,@phase,@phaseDetail,@archivePath,@installDir,@gameRoot,@runAfter,@selectedMods,@appliedMods,@error,CURRENT_TIMESTAMP)
+        (game_id,url,status,bytes_downloaded,total_bytes,phase,phase_detail,extraction_progress,archive_path,install_dir,game_root,run_after,selected_mods,applied_mods,error,updated_at)
+      VALUES (@gameId,@url,@status,@bytesDownloaded,@totalBytes,@phase,@phaseDetail,@extractionProgress,@archivePath,@installDir,@gameRoot,@runAfter,@selectedMods,@appliedMods,@error,CURRENT_TIMESTAMP)
       ON CONFLICT(game_id) DO UPDATE SET
         url=excluded.url,
         status=excluded.status,
@@ -401,6 +415,7 @@ export class LibraryDatabase {
         total_bytes=excluded.total_bytes,
         phase=excluded.phase,
         phase_detail=excluded.phase_detail,
+        extraction_progress=excluded.extraction_progress,
         archive_path=excluded.archive_path,
         install_dir=excluded.install_dir,
         game_root=excluded.game_root,
@@ -415,6 +430,7 @@ export class LibraryDatabase {
       totalBytes: download.totalBytes ?? null,
       phase: download.phase ?? null,
       phaseDetail: download.phaseDetail ?? null,
+      extractionProgress: download.extractionProgress ?? null,
       gameRoot: download.gameRoot ?? download.installDir,
       runAfter: download.runAfter ? 1 : 0,
       selectedMods: JSON.stringify(download.selectedModIds ?? []),
@@ -425,7 +441,7 @@ export class LibraryDatabase {
 
   updateDownload(
     gameId: number,
-    patch: Partial<Pick<GameDownloadRecord, "status" | "bytesDownloaded" | "totalBytes" | "error" | "phase" | "phaseDetail">> &
+    patch: Partial<Pick<GameDownloadRecord, "status" | "bytesDownloaded" | "totalBytes" | "error" | "phase" | "phaseDetail" | "extractionProgress">> &
       Partial<Pick<InstalledGame, "gameRoot" | "appliedModIds">>,
   ): void {
     const current = this.getDownload(gameId);
@@ -443,7 +459,7 @@ export class LibraryDatabase {
   recoverInterruptedDownloads(): void {
     this.db.prepare(`
       UPDATE downloads
-      SET status='failed', phase=NULL, phase_detail=NULL,
+      SET status='failed', phase=NULL, phase_detail=NULL, extraction_progress=NULL,
           error='The app closed before this download finished.',
           updated_at=CURRENT_TIMESTAMP
       WHERE status IN ('downloading','paused')

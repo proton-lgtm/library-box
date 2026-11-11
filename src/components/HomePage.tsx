@@ -1,15 +1,19 @@
 import type { Game } from "../shared/types";
 import { Cover } from "./Cover";
+import { ReloadButton, type ReloadProps } from "./ReloadButton";
 
-interface HomePageProps {
+interface HomePageProps extends ReloadProps {
   games: Game[];
   onSelect: (game: Game) => void;
 }
 
-export function HomePage({ games, onSelect }: HomePageProps) {
+export function HomePage({ games, onSelect, onReload, reloading }: HomePageProps) {
   return (
     <section className="content-page">
-      <h1 className="page-heading">Games</h1>
+      <div className="page-heading-row">
+        <h1 className="page-heading">Games</h1>
+        <ReloadButton onReload={onReload} reloading={reloading} />
+      </div>
       {games.length ? (
         <div className="game-grid">
           {games.map((game) => (

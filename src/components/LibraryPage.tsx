@@ -2,10 +2,11 @@ import { Info, MoreVertical, Play, Puzzle, ShieldCheck, Square, Trash2 } from "l
 import { useState } from "react";
 import type { InstalledGame } from "../shared/types";
 import { Cover } from "./Cover";
+import { ReloadButton, type ReloadProps } from "./ReloadButton";
 
 type LibraryTab = "installed" | "favorites";
 
-interface LibraryPageProps {
+interface LibraryPageProps extends ReloadProps {
   installed: InstalledGame[];
   search: string;
   onLaunch: (gameId: number) => void;
@@ -23,6 +24,8 @@ export function LibraryPage({
   onDelete,
   onApplyMods,
   onViewDetails,
+  onReload,
+  reloading,
 }: LibraryPageProps) {
   const [tab, setTab] = useState<LibraryTab>("installed");
   const query = search.trim().toLowerCase();
@@ -32,7 +35,10 @@ export function LibraryPage({
 
   return (
     <section className="list-page library-page">
-      <h1 className="page-heading">Library</h1>
+      <div className="page-heading-row">
+        <h1 className="page-heading">Library</h1>
+        <ReloadButton onReload={onReload} reloading={reloading} />
+      </div>
       <div className="library-filters" role="tablist" aria-label="Filter library">
         {([
           ["installed", "Installed"],

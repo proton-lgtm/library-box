@@ -17,6 +17,7 @@ import { extractArchive, findGameRootInArchive } from "../archive";
 import type { LibraryDatabase } from "../database";
 import { findGameLauncher, type Launcher } from "../launcher";
 import { applyModArchive } from "./mod-installer";
+import { restoreOriginalInstallation } from "./restore-original";
 
 interface Transfer {
   controller?: AbortController;
@@ -315,6 +316,7 @@ export class DownloadManager {
       phase: record.phase ?? null,
       detail: record.phaseDetail ?? null,
       phaseDetail: record.phaseDetail ?? null,
+      extractionProgress: record.extractionProgress ?? null,
       installDir: record.installDir,
     };
   }
@@ -337,6 +339,7 @@ export class DownloadManager {
           totalBytes: null,
           error: null,
           phase: "downloading-mod",
+          extractionProgress: null,
           detail: game.mods[modId].name,
           phaseDetail: game.mods[modId].name,
           installDir,
@@ -350,6 +353,9 @@ export class DownloadManager {
     const job = this.modJobs.get(id);
     if (!job) return;
     Object.assign(job.item, patch);
+    if (patch.status && ["completed", "failed", "cancelled", "paused"].includes(patch.status)) {
+      job.item.extractionProgress = null;
+    }
     this.emitItem(job.item);
   }
 
@@ -435,6 +441,7 @@ export class DownloadManager {
         error: null,
         phase: null,
         phaseDetail: null,
+      extractionProgress: null,
       });
       this.emit(gameId);
     }
@@ -458,6 +465,7 @@ export class DownloadManager {
       error: null,
       phase: null,
       phaseDetail: null,
+      extractionProgress: null,
     });
     this.emit(gameId);
     transfer.completion = this.resumeTransfer(gameId, validatedUrl, transfer);
@@ -475,6 +483,7 @@ export class DownloadManager {
       error: null,
       phase: null,
       phaseDetail: null,
+      extractionProgress: null,
     });
     this.emit(gameId);
     transfer.completion = this.startBrowserTransfer(
@@ -590,6 +599,7 @@ export class DownloadManager {
       error: null,
       phase: null,
       phaseDetail: null,
+      extractionProgress: null,
     });
     transfer?.controller?.abort();
     transfer?.item?.cancel();
@@ -613,6 +623,105 @@ export class DownloadManager {
       partialArchives.push(path.join(record.installDir, `${safeFileName(mod.name)}${extension}.part`));
     }
     await Promise.all(partialArchives.map((partialPath) => rm(partialPath, { force: true })));
+  }
+
+  async runExclusive(gameId: number, operation: () => Promise<void>): Promise<void> {
+    if (this.isActive(gameId)) throw new Error("This game already has an active operation.");
+    const transfer: Transfer = {};
+    this.transfers.set(gameId, transfer);
+    try {
+      await operation();
+    } finally {
+      if (this.transfers.get(gameId) === transfer) this.transfers.delete(gameId);
+    }
+  }
+
+  activeGameIds(): ReadonlySet<number> {
+    return new Set(this.transfers.keys());
+  }
+
+  async reverifyLocalGames(): Promise<void> {
+    for (const gameId of this.database.listLocalGameIds()) {
+      const record = this.database.getDownload(gameId);
+      if (!record || ["downloading", "paused"].includes(record.status) ||
+          this.isActive(gameId) || this.launcher.runningIds().has(gameId)) continue;
+      let stale = false;
+      try {
+        const folder = await lstat(record.installDir);
+        stale = !folder.isDirectory() || folder.isSymbolicLink();
+        if (!stale && record.status === "installed") {
+          const root = path.resolve(record.gameRoot);
+          const relative = path.relative(path.resolve(record.installDir), root);
+          stale = path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`) ||
+            !await findGameLauncher(root);
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+        stale = true;
+      }
+      const current = this.database.getDownload(gameId);
+      if (stale && current?.status === record.status && current.installDir === record.installDir &&
+          current.gameRoot === record.gameRoot && !this.isActive(gameId) &&
+          !this.launcher.runningIds().has(gameId)) {
+        this.database.removeInactiveDownload(gameId);
+        this.removeGameQueueHistory(gameId);
+      }
+    }
+  }
+
+  async removeAllMods(gameId: number): Promise<void> {
+    const record = this.database.getDownload(gameId);
+    if (!record || record.status !== "installed") throw new Error("Game is not installed.");
+    if (this.launcher.runningIds().has(gameId)) throw new Error("Stop the game before removing mods.");
+    if (this.isActive(gameId) || Array.from(this.modJobs.values()).some((job) =>
+      job.item.gameId === gameId && !["completed", "failed", "cancelled"].includes(job.item.status))) {
+      throw new Error("This game already has an active operation.");
+    }
+    const transfer: Transfer = {};
+    this.transfers.set(gameId, transfer);
+    const publish = (status: DownloadQueueStatus) => {
+      const current = this.database.getDownload(gameId);
+      if (!current) return;
+      const item = this.gameQueueItem(current, status);
+      this.completedGames.set(gameId, item);
+      this.emitItem(item);
+    };
+    try {
+      this.database.updateDownload(gameId, {
+        phase: null, phaseDetail: "Preparing: validating original archive", extractionProgress: null, error: null,
+      });
+      publish("applying");
+      const otherDirectories = this.database.listLocalGameIds()
+        .filter((id) => id !== gameId)
+        .map((id) => this.database.getDownload(id)!.installDir);
+      const warning = await restoreOriginalInstallation(record, otherDirectories, ({ percent, detail }) => {
+        this.database.updateDownload(gameId, {
+          phase: "extracting",
+          extractionProgress: percent,
+          phaseDetail: detail ?? "Restoring original game files",
+        });
+        publish("applying");
+      }, (gameRoot) => {
+        this.database.updateDownload(gameId, {
+          gameRoot, appliedModIds: [], phase: null, phaseDetail: null, extractionProgress: null, error: null,
+        });
+      });
+      for (const [id, job] of this.modJobs) {
+        if (job.item.gameId === gameId) this.modJobs.delete(id);
+      }
+      if (warning) this.database.updateDownload(gameId, { phaseDetail: warning });
+      publish("completed");
+    } catch (error) {
+      this.database.updateDownload(gameId, {
+        phase: null, phaseDetail: null, extractionProgress: null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      publish("failed");
+      throw error;
+    } finally {
+      this.transfers.delete(gameId);
+    }
   }
 
   async applyMods(gameId: number, requestedModIds: number[]): Promise<void> {
@@ -697,7 +806,7 @@ export class DownloadManager {
     this.transfers.delete(gameId);
     const current = this.database.getDownload(gameId);
     if (current?.status === "installed" && current.phase) {
-      this.database.updateDownload(gameId, { phase: null, phaseDetail: null });
+      this.database.updateDownload(gameId, { phase: null, phaseDetail: null, extractionProgress: null });
       this.emit(gameId);
     }
   }
@@ -745,16 +854,22 @@ export class DownloadManager {
         if (job.cancelled) throw new ModCancelledError();
         this.database.updateDownload(game.id, {
           phase: "applying-mods",
+          extractionProgress: null,
           phaseDetail: mod.name,
         });
         this.emit(game.id);
         this.updateMod(id, {
           status: "applying",
           phase: "applying-mods",
+          extractionProgress: null,
           detail: mod.name,
           phaseDetail: mod.name,
         });
-        await applyModArchive(modArchive, mod, gameRoot, isDirectFileMod(mod));
+        await applyModArchive(modArchive, mod, gameRoot, isDirectFileMod(mod), ({ percent, detail }) => {
+          this.database.updateDownload(game.id, { extractionProgress: percent, phaseDetail: detail ?? mod.name });
+          this.emit(game.id);
+          this.updateMod(id, { extractionProgress: percent, phaseDetail: detail ?? mod.name });
+        });
         if (job.cancelled) throw new ModCancelledError();
         const latest = this.database.getDownload(game.id);
         if (!latest) throw new Error("The game download record was lost while applying mods.");
@@ -769,6 +884,7 @@ export class DownloadManager {
           phase: null,
           detail: null,
           phaseDetail: null,
+          extractionProgress: null,
         });
       } catch (error) {
         await this.removeModPartial(job.item);
@@ -883,6 +999,7 @@ export class DownloadManager {
         error: null,
         phase: null,
         phaseDetail: null,
+      extractionProgress: null,
       });
       this.emit(gameId);
       const reader = response.body.getReader();
@@ -970,6 +1087,7 @@ export class DownloadManager {
             totalBytes: item.getTotalBytes() || null,
             phase: null,
             phaseDetail: null,
+          extractionProgress: null,
           });
           this.emit(gameId);
         });
@@ -1030,12 +1148,17 @@ export class DownloadManager {
     this.database.updateDownload(gameId, {
       phase: "extracting",
       phaseDetail: null,
+      extractionProgress: null,
     });
     this.emit(gameId);
-    await extractArchive(archivePath, record.installDir);
+    await extractArchive(archivePath, record.installDir, ({ percent, detail }) => {
+      this.database.updateDownload(gameId, { extractionProgress: percent, phaseDetail: detail });
+      this.emit(gameId);
+    });
     this.database.updateDownload(gameId, {
       phase: "finalizing",
       phaseDetail: null,
+      extractionProgress: null,
     });
     this.emit(gameId);
     const launcher = await findGameLauncher(gameRoot);
@@ -1048,6 +1171,7 @@ export class DownloadManager {
     completedItem.phase = null;
     completedItem.detail = null;
     completedItem.phaseDetail = null;
+    completedItem.extractionProgress = null;
     this.completedGames.set(gameId, completedItem);
     this.emitItem(completedItem);
     await this.processModQueue(
@@ -1066,6 +1190,7 @@ export class DownloadManager {
       error: null,
       phase: null,
       phaseDetail: null,
+      extractionProgress: null,
     });
     const completed = this.database.getDownload(gameId);
     if (completed) this.completedGames.set(gameId, this.gameQueueItem(completed, "completed"));
@@ -1298,6 +1423,7 @@ export class DownloadManager {
       error: error instanceof Error ? error.message : String(error),
       phase: null,
       phaseDetail: null,
+      extractionProgress: null,
     });
     this.emit(gameId);
   }
