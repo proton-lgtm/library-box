@@ -1,6 +1,6 @@
 ﻿# Playmart waitlist website
 
-Standalone Next.js/TypeScript app for collecting **email waitlist signups only**. No passwords, Auth accounts, verification emails, analytics, mailing integration, or admin dashboard. The Electron app and its dependencies are independent.
+Standalone Next.js/TypeScript app for collecting **email waitlist signups only**. No passwords, Auth accounts, verification emails, mailing integration, or admin dashboard. Vercel Web Analytics tracks page views through the root layout; no custom events or signup email addresses are sent to Analytics. The Electron app and its dependencies are independent.
 
 ## Interactive preview
 
@@ -81,6 +81,22 @@ No additional `vercel.json` is required. Keep the form and `/api/waitlist` on th
 ```
 
 A matching browser `Origin` header is required. Emails are trimmed and lowercased without altering plus-addressing or dots. A new signup and an existing email both return `200 {"success":true}`; duplicates do not change the original timestamps. A filled honeypot receives the same response but is not saved. Invalid inputs/challenges are rejected, provider/configuration errors return a generic `503`, and all responses disable caching. Challenge tokens and IP addresses are never stored in the waitlist table. The widget resets after each attempt, errors retain the email, and there is no password or email delivery flow.
+
+## Vercel Web Analytics
+
+The root layout includes `Analytics` from `@vercel/analytics/next`. Enable Web Analytics in the Vercel project's **Analytics** tab, redeploy this version, then visit the deployed site. Page views appear in the dashboard after collection; content blockers can prevent collection. Local development uses the package's debug behavior. No extra analytics environment variable or custom signup event is required. Update the operator privacy policy to reflect analytics usage.
+
+## Troubleshooting deployed 503 responses
+
+The endpoint is `/api/waitlist`. A `503 {"error":"Service unavailable."}` deliberately hides provider details. GitHub Actions environment secrets are **not** Vercel environment variables: configure the website variables in Vercel's Production environment and redeploy after changing them.
+
+In Vercel Runtime Logs, filter for `[waitlist] submission failed`. Logs contain only a failure stage, a fixed reason, optional missing variable **names**, HTTP status and a sanitized database error code; never emails, tokens, keys or raw provider responses.
+
+- `configuration`: check the listed missing variables. If the list is empty, check URL formatting, an HTTPS privacy policy, and `TURNSTILE_EXPECTED_HOSTNAMES` (for this deployment, `playmart.vercel.app`, with no scheme or path).
+- `turnstile`: verify the server secret matches the widget/site key. Provider HTTP errors, invalid verification responses or timeouts are logged without sensitive details. Allow the deployed hostname in Cloudflare too.
+- `supabase`: check the project URL/server secret and apply the waitlist migration. `42501` indicates permissions; `42P01` or `PGRST205` typically indicates a missing table/schema-cache entry. Inspect the selected project before changing grants. `401` generally indicates an invalid server credential.
+
+No live signup is sent by automated tests. Do not weaken RLS, bypass Turnstile, or expose server keys to resolve a deployment error.
 
 ## Validation
 
