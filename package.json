@@ -1,8 +1,8 @@
 {
-  "name": "game-library",
+  "name": "playmart",
   "private": true,
   "version": "0.1.0",
-  "description": "A local-first cross-platform desktop game library.",
+  "description": "Playmart ? a local-first cross-platform desktop game library.",
   "type": "module",
   "main": "./out/main/index.cjs",
   "scripts": {
@@ -56,8 +56,8 @@
     }
   },
   "build": {
-    "appId": "com.game.library",
-    "productName": "Library",
+    "appId": "com.playmart.app",
+    "productName": "Playmart",
     "directories": {
       "output": "release",
       "buildResources": "assets"

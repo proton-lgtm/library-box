@@ -1,4 +1,4 @@
-# Game Library
+# Playmart
 
 A cross-platform desktop game library built with Electron, React, TypeScript, and Vite. Supabase is the source of truth for the public game catalog and authentication. SQLite caches catalog data for offline browsing and stores device-local download/install state. The Python CLI in `py_box/` remains available independently.
 
@@ -74,6 +74,8 @@ npm run package:mac
 npm run package:linux
 ```
 
+The Windows release workflow builds both a portable executable and an NSIS installer, uploading each as a workflow artifact and attaching both to the GitHub release. It derives the embedded app version and filenames from the release tag (`v0.1.2` produces `Playmart-0.1.2-portable.exe` and `Playmart-0.1.2-setup.exe`), updating both package manifests in the CI checkout before packaging. Manual runs use the supplied release tag and checked-out source commit. Release titles use `Playmart vX.Y.Z`. These CI version changes are not committed back to the repository.
+
 The Windows release workflow uses the GitHub Actions `prod` environment. Configure its `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` secrets before publishing a release; the packaging step validates their presence and embeds these public client settings during the build. Never use a service-role/secret key for the desktop app.
 
 Build native packages on their target operating system for the most reliable results. macOS signing/notarization requires macOS and Apple developer tooling; this project does not configure signing credentials. Linux package formats may require distribution-specific build dependencies. Windows, MacOS, and Linux packages have not all been validated from one machine.
@@ -85,6 +87,8 @@ Home shows the games fetched from Supabase; the last cached catalog remains avai
 ### Refreshing pages and restoring unmodified games
 
 Every main page has a **Reload page** control. Home and Game Details refetch the catalog from Supabase. Downloads and Library reverify local installation folders and required game content, removing stale local records without deleting game files. Active work is protected during verification.
+
+Packaged builds run the bundled 7-Zip executable from `resources/app.asar.unpacked`, not from the virtual `app.asar` archive. Keep `7zip-bin` in the packaging `asarUnpack` list. The Windows release workflow checks that the unpacked executable exists and can run before publishing.
 
 Archive extraction has its own progress indicator for both games and mods. When the extractor cannot report progress, an indeterminate indicator is shown instead of a misleading completed download percentage.
 
@@ -101,3 +105,7 @@ ZIP, 7z, and RAR archives are extracted with the bundled 7-Zip executable. Archi
 ## Security notes
 
 Electron windows use context isolation, sandboxing, and disabled Node integration. The preload exposes only the library operations needed by the UI. IPC validates payloads, download URLs are checked against the selected game's catalog links, external links and network redirects must use HTTPS and cannot target localhost, and the download destination must be an existing folder. SQLite data and encrypted auth session data are stored in Electron's per-user application data directory.
+
+### Playmart data folders
+
+Playmart always uses `Playmart Data` beside portable executables or `Playmart` inside the OS application-data directory for desktop runs. Older application-data folders are not detected, reused or migrated. The storage cleanup utility targets only the Playmart desktop folder. The Library navigation label denotes the collection page, not the product name.

@@ -5,12 +5,13 @@ const readline = require("node:readline/promises");
 const { stdin, stdout } = require("node:process");
 
 async function main() {
-  app.setName("game-library");
+  app.setName("Playmart");
+  app.setPath("userData", path.join(app.getPath("appData"), "Playmart"));
   await app.whenReady();
 
   const userDataPath = path.resolve(app.getPath("userData"));
   const appDataPath = path.resolve(app.getPath("appData"));
-  const allowedNames = new Set([app.getName()]);
+  const allowedNames = new Set(["Playmart"]);
   const folderName = path.basename(userDataPath);
 
   if (path.dirname(userDataPath) !== appDataPath || !allowedNames.has(folderName)) {

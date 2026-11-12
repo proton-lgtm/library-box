@@ -6,6 +6,13 @@ import { path7za } from "7zip-bin";
 
 const execFileAsync = promisify(execFile);
 
+export function resolveArchiveBinaryPath(binaryPath: string): string {
+  // Child processes need a real executable, not Electron's virtual ASAR path.
+  return binaryPath.replace(/([\\/])app\.asar([\\/])/, "$1app.asar.unpacked$2");
+}
+
+const archiveBinaryPath = resolveArchiveBinaryPath(path7za);
+
 export function validateArchivePaths(
   entries: string[],
   destination: string,
@@ -47,7 +54,7 @@ export async function findGameRootInArchive(
 ): Promise<string> {
   const archive = path.resolve(archivePath);
   const installRoot = path.resolve(installDirectory);
-  const listing = await execFileAsync(path7za, ["l", "-slt", "-p-", "--", archive], {
+  const listing = await execFileAsync(archiveBinaryPath, ["l", "-slt", "-p-", "--", archive], {
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024,
   });
@@ -105,7 +112,7 @@ export async function assertUnlinkedPath(target: string): Promise<void> {
 export async function validateArchive(archivePath: string, destination: string): Promise<void> {
   const archive = path.resolve(archivePath);
   await assertUnlinkedPath(archive);
-  const listing = await execFileAsync(path7za, ["l", "-slt", "-p-", "--", archive], {
+  const listing = await execFileAsync(archiveBinaryPath, ["l", "-slt", "-p-", "--", archive], {
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024,
   });
@@ -131,7 +138,7 @@ export async function validateArchive(archivePath: string, destination: string):
 }
 
 export async function testArchive(archivePath: string): Promise<void> {
-  await execFileAsync(path7za, ["t", "-p-", "--", path.resolve(archivePath)], {
+  await execFileAsync(archiveBinaryPath, ["t", "-p-", "--", path.resolve(archivePath)], {
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024,
   });
@@ -147,7 +154,7 @@ export async function extractArchive(
   onProgress?.({ percent: null, detail: null });
   await validateArchive(archive, target);
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(path7za, ["x", "-y", "-p-", "-bsp1", "-bso0", "-bse2", `-o${target}`, "--", archive], {
+    const child = spawn(archiveBinaryPath, ["x", "-y", "-p-", "-bsp1", "-bso0", "-bse2", `-o${target}`, "--", archive], {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });

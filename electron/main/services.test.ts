@@ -68,10 +68,10 @@ afterEach(async () => {
 });
 
 describe("portable application data", () => {
-  it("uses a Library Data folder beside the portable executable", () => {
+  it("uses a Playmart Data folder beside the portable executable", () => {
     const executableDirectory = path.join(makeTempDirectory(), "portable");
     expect(portableUserDataPath(executableDirectory))
-      .toBe(path.join(path.resolve(executableDirectory), "Library Data"));
+      .toBe(path.join(path.resolve(executableDirectory), "Playmart Data"));
   });
 
   it("keeps the default Electron location outside portable mode", () => {

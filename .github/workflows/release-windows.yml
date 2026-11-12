@@ -1,4 +1,4 @@
-name: Release Windows portable app
+name: Release Playmart for Windows
 
 on:
   push:
@@ -40,13 +40,27 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Set version from release tag
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: node scripts/release-metadata.cjs
+
+      - name: Resolve checked-out commit
+        id: source
+        shell: pwsh
+        run: |
+          $sha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Could not resolve the release source commit." }
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
       - name: Install dependencies
         run: npm ci
 
       - name: Run tests
         run: npm test
 
-      - name: Build portable executable
+      - name: Build portable executable and NSIS installer
         shell: pwsh
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
@@ -56,13 +70,24 @@ jobs:
               [string]::IsNullOrWhiteSpace($env:NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)) {
             throw "Configure NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY in the prod environment before releasing."
           }
-          npm run package:win
+          npm run package:win -- --win portable nsis '-c.nsis.artifactName=${productName}-${version}-setup.${ext}'
+          if ($LASTEXITCODE -ne 0) { throw "Could not build the Windows packages." }
+
+      - name: Verify unpacked archive extractor
+        shell: pwsh
+        run: |
+          $extractor = Join-Path $PWD 'release\win-unpacked\resources\app.asar.unpacked\node_modules\7zip-bin\win\x64\7za.exe'
+          if (-not (Test-Path -LiteralPath $extractor -PathType Leaf)) {
+            throw "The packaged 7-Zip executable is missing: $extractor"
+          }
+          & $extractor i
+          if ($LASTEXITCODE -ne 0) { throw "The packaged 7-Zip executable could not run." }
 
       - name: Locate portable executable
         id: portable
         shell: pwsh
         run: |
-          $artifact = Get-ChildItem release -Filter "Library-*-portable.exe" -File
+          $artifact = @(Get-ChildItem release -Filter "Playmart-${{ steps.release.outputs.version }}-portable.exe" -File)
           if ($artifact.Count -ne 1) {
             throw "Expected exactly one portable executable, found $($artifact.Count)."
           }
@@ -76,26 +101,46 @@ jobs:
           path: ${{ steps.portable.outputs.path }}
           if-no-files-found: error
 
+      - name: Locate NSIS installer
+        id: installer
+        shell: pwsh
+        run: |
+          $artifact = @(Get-ChildItem release -Filter "Playmart-${{ steps.release.outputs.version }}-setup.exe" -File)
+          if ($artifact.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($artifact.Count)."
+          }
+          "path=$($artifact.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($artifact.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload NSIS workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.installer.outputs.name }}
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+
       - name: Publish GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          MANUAL_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.source.outputs.sha }}
+          PORTABLE_PATH: ${{ steps.portable.outputs.path }}
+          INSTALLER_PATH: ${{ steps.installer.outputs.path }}
         run: |
-          $tag = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
-            $env:MANUAL_TAG
-          } else {
-            $env:GITHUB_REF_NAME
-          }
+          $tag = $env:RELEASE_TAG
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag "${{ steps.portable.outputs.path }}" `
+            gh release upload $tag $env:PORTABLE_PATH $env:INSTALLER_PATH `
               --repo $env:GITHUB_REPOSITORY `
               --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Could not upload the Playmart Windows packages." }
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title "Playmart $tag"
           } else {
-            gh release create $tag "${{ steps.portable.outputs.path }}" `
+            gh release create $tag $env:PORTABLE_PATH $env:INSTALLER_PATH `
               --repo $env:GITHUB_REPOSITORY `
-              --target $env:GITHUB_SHA `
-              --title "Library $tag" `
+              --target $env:RELEASE_SHA `
+              --title "Playmart $tag" `
               --generate-notes
           }
+          if ($LASTEXITCODE -ne 0) { throw "Could not publish the Playmart release." }

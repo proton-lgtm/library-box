@@ -7,12 +7,15 @@ import { configureDownloadBrowserSession, DownloadManager } from "./downloads/do
 import { registerIpc } from "./ipc";
 import { Launcher } from "./launcher";
 import { LibraryManager } from "./library-manager";
-import { portableUserDataPath } from "./portable-path";
+import { desktopUserDataPath, portableUserDataPath } from "./portable-path";
 import { createEncryptedSessionStorage, type AuthSessionStorage } from "./secure-session-storage";
 import { SupabaseService } from "./supabase-service";
 
 declare const __SUPABASE_URL__: string;
 declare const __SUPABASE_PUBLISHABLE_KEY__: string;
+
+app.setName("Playmart");
+app.setPath("userData", desktopUserDataPath(app.getPath("appData")));
 
 const currentDirectory = __dirname;
 const portableDataDirectory = portableUserDataPath(process.env.PORTABLE_EXECUTABLE_DIR);
@@ -42,7 +45,7 @@ function createWindow(downloads: DownloadManager, launcher: Launcher, supabase: 
     minWidth: 1050,
     minHeight: 700,
     backgroundColor: "#0b0b0d",
-    title: "",
+    title: "Playmart",
     frame: false,
     webPreferences: {
       preload: path.join(currentDirectory, "../preload/index.cjs"),
@@ -73,7 +76,7 @@ void app.whenReady().then(async () => {
   if (portableDataError) {
     dialog.showErrorBox(
       "Portable data folder unavailable",
-      `Library could not create its data folder beside the executable.\n\n${portableDataError.message}`,
+      `Playmart could not create its data folder beside the executable.\n\n${portableDataError.message}`,
     );
     app.quit();
     return;

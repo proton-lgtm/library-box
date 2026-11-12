@@ -5,11 +5,21 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { path7za } from "7zip-bin";
 import { afterEach, expect, it, vi } from "vitest";
-import { extractArchive, type ExtractionProgress } from "./archive";
+import { extractArchive, resolveArchiveBinaryPath, type ExtractionProgress } from "./archive";
 
 vi.mock("node:child_process", async (original) => ({
   ...await original<typeof import("node:child_process")>(), spawn: vi.fn(),
 }));
+it.each([
+  [String.raw`C:\Portable App\resources\app.asar\node_modules\7zip-bin\win\x64\7za.exe`, String.raw`C:\Portable App\resources\app.asar.unpacked\node_modules\7zip-bin\win\x64\7za.exe`],
+  ["/Applications/Playmart.app/Contents/Resources/app.asar/node_modules/7zip-bin/mac/arm64/7za", "/Applications/Playmart.app/Contents/Resources/app.asar.unpacked/node_modules/7zip-bin/mac/arm64/7za"],
+  ["/opt/Playmart/resources/app.asar/node_modules/7zip-bin/linux/x64/7za", "/opt/Playmart/resources/app.asar.unpacked/node_modules/7zip-bin/linux/x64/7za"],
+  [path7za, path7za],
+  [String.raw`C:\app.asar-backup\resources\app.asar.unpacked\7za.exe`, String.raw`C:\app.asar-backup\resources\app.asar.unpacked\7za.exe`],
+])("resolves the extractor executable on disk: %s", (input, expected) => {
+  expect(resolveArchiveBinaryPath(input)).toBe(expected);
+});
+
 const roots: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
