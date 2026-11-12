@@ -7,6 +7,7 @@
   "main": "./out/main/index.cjs",
   "scripts": {
     "dev": "cross-env OPEN_DEVTOOLS=0 electron-vite dev",
+    "icons": "electron scripts/generate-app-icons.cjs",
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.electron.json",
     "test": "vitest run",

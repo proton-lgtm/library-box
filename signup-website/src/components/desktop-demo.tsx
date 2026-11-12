@@ -33,19 +33,28 @@ function ModsDialog({ game, applied, onApply, onClose }: { game: DemoGame; appli
   useEffect(() => {
     const element = dialog.current;
     const previous = document.activeElement as HTMLElement | null;
-    element?.showModal();
+    element?.show();
+    element?.querySelector<HTMLButtonElement>("button")?.focus();
     return () => { element?.close(); previous?.focus(); };
   }, []);
   return (
-    <dialog ref={dialog} className="demo-modal" onCancel={(event) => { event.preventDefault(); onClose(); }} onClick={(event) => { if (event.target === event.currentTarget) { const r = event.currentTarget.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) onClose(); } }} aria-labelledby="demo-mod-title" aria-describedby="demo-mod-description">
+    <div className="demo-modal-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}><dialog ref={dialog} className="demo-modal" aria-modal="true" onKeyDown={(event) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); }
+      if (event.key === "Tab") {
+        const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]'));
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+    }} onCancel={(event) => { event.preventDefault(); onClose(); }} onClick={(event) => { if (event.target === event.currentTarget) { const r = event.currentTarget.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) onClose(); } }} aria-labelledby="demo-mod-title" aria-describedby="demo-mod-description">
       <div className="demo-modal-heading"><h3 id="demo-mod-title">Mods for {game.name}</h3><button type="button" className="demo-icon-button" aria-label="Close mod selection" onClick={onClose}><Icon name="close" /></button></div>
-      <p id="demo-mod-description">A little something extra. Select a mod to try the simulated install.</p>
+      <p id="demo-mod-description">Select mods to apply.</p>
       <fieldset className="demo-mod-options"><legend>Select mods to apply</legend>{game.mods.map(mod => {
         const isApplied = applied.includes(mod.id);
         return <label key={mod.id}><input type="checkbox" checked={isApplied || selected.includes(mod.id)} disabled={isApplied} onChange={(event) => setSelected(ids => event.target.checked ? [...ids, mod.id] : ids.filter(id => id !== mod.id))} /><span>{mod.name}</span>{isApplied && <small>Applied</small>}</label>;
       })}</fieldset>
-      <div className="demo-modal-footer"><span>No files will be downloaded.</span><button type="button" className="demo-button primary" disabled={selected.length === 0} onClick={() => onApply(selected)}>Apply mods <Icon name="download" size={16} /></button></div>
-    </dialog>
+      <div className="demo-modal-footer"><button type="button" className="demo-button primary" disabled={selected.length === 0} onClick={() => onApply(selected)}>Apply mods <Icon name="download" size={16} /></button></div>
+    </dialog></div>
   );
 }
 
@@ -58,7 +67,7 @@ export function DesktopDemo() {
   const [notice, setNotice] = useState("");
   const heading = useRef<HTMLHeadingElement>(null);
   const focusNext = useRef(false);
-  const content = useRef<HTMLDivElement>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
   const selected = DEMO_GAMES.find(game => game.id === selectedId);
   const modsGame = DEMO_GAMES.find(game => game.id === modsId);
   const active = state.jobs.filter(job => job.status === "downloading" || job.status === "paused");
@@ -73,7 +82,6 @@ export function DesktopDemo() {
   useEffect(() => {
     if (!focusNext.current) return;
     heading.current?.focus({ preventScroll: true });
-    content.current?.scrollTo({ top: 0 });
     focusNext.current = false;
   }, [page, selectedId]);
 
@@ -81,6 +89,7 @@ export function DesktopDemo() {
     focusNext.current = true;
     setSelectedId(null);
     setPage(next);
+
   }
   function details(game: DemoGame) {
     focusNext.current = true;
@@ -98,13 +107,6 @@ export function DesktopDemo() {
     setModsId(null);
     navigate("downloads");
   }
-  function reset() {
-    dispatch({ type: "reset" });
-    setModsId(null);
-    setSearch("");
-    setNotice("Demo reset. Nothing is saved or downloaded.");
-    navigate("home");
-  }
   const busyGame = (id: string) => active.some(job => job.gameId === id);
   const title = selected ? selected.name : page === "home" ? "Games" : page === "downloads" ? "Downloads" : "Library";
   const visibleGames = DEMO_GAMES.filter(game => game.name.toLowerCase().includes(search.trim().toLowerCase()));
@@ -113,38 +115,36 @@ export function DesktopDemo() {
 
   return (
     <section className="demo-section" id="demo" aria-label="Interactive Playmart preview">
-      <div className="demo-label"><span><i /> INTERACTIVE PREVIEW</span><p>Click around. Everything here is a simulation.</p></div>
       <div className="desktop-demo">
-        <div className="demo-titlebar"><span className="demo-window-dots" aria-hidden="true"><i /><i /><i /></span><span>Playmart</span><span className="demo-title-tag">DEMO</span></div>
-        <div className="demo-shell">
-          <aside className="demo-sidebar"><span className="demo-brand">playmart<span>.</span></span><nav aria-label="Demo navigation">{(["home", "downloads", "library"] as const).map(item => <button type="button" key={item} onClick={() => navigate(item)} aria-current={!selected && page === item ? "page" : undefined} className={!selected && page === item ? "active" : ""}><Icon name={item === "downloads" ? "download" : item} /><span>{item[0].toUpperCase() + item.slice(1)}</span>{item === "downloads" && active.length > 0 && <small>{active.length}</small>}</button>)}</nav><div className="demo-sidebar-bottom"><span className="demo-online-dot" /> Just exploring</div></aside>
-          <div className="demo-main" ref={content}>
-            <header className="demo-topbar">{!selected && page !== "downloads" ? <label className="demo-search"><Icon name="search" size={17} /><input type="search" aria-label="Search demo games" placeholder="Search games…" value={search} onChange={(event) => setSearch(event.target.value)} /></label> : <span />}<span className="demo-account"><span>P</span><span>Player<small>Preview account</small></span></span></header>
+        <div className="demo-titlebar"><span className="demo-window-dots" aria-hidden="true"><i /><i /><i /></span><span>Playmart</span></div>
+        <div className="demo-shell" inert={Boolean(modsGame)}>
+          <aside className="demo-sidebar"><span className="demo-brand">playmart<span>.</span></span><nav aria-label="Demo navigation">{(["home", "downloads", "library"] as const).map(item => <button type="button" key={item} onClick={() => navigate(item)} aria-current={!selected && page === item ? "page" : undefined} className={!selected && page === item ? "active" : ""}><Icon name={item === "downloads" ? "download" : item} /><span>{item[0].toUpperCase() + item.slice(1)}</span>{item === "downloads" && active.length > 0 && <small>{active.length}</small>}</button>)}</nav></aside>
+          <div className="demo-main">
+            <header className="demo-topbar">{!selected && page !== "downloads" ? <label className="demo-search"><Icon name="search" size={17} /><input type="search" aria-label="Search demo games" value={search} onChange={(event) => { setSearch(event.target.value); }} /></label> : <span />}<span className="demo-account"><span>P</span><span>Player</span></span></header>
             <div className="demo-page">
               {selected && <button type="button" className="demo-back" onClick={() => navigate(page)}><Icon name="back" size={16} /> Back</button>}
-              <div className="demo-page-heading"><h2 ref={heading} tabIndex={-1}>{title}</h2><span>{selected ? "GAME DETAILS" : page === "home" ? `${DEMO_GAMES.length} TO EXPLORE` : page === "library" ? "YOUR COLLECTION" : `${active.length} ACTIVE`}</span></div>
+              <div className="demo-page-heading"><h2 ref={heading} tabIndex={-1}>{title}</h2></div>
               {selected ? (
-                <div className="demo-details"><Artwork game={selected} className="detail-art" /><div className="demo-details-copy"><span className="demo-tag">Adventure · Mock game</span><p>{selected.description}</p><div className="demo-metadata"><span><small>FILE SIZE</small>{selected.sizeLabel}</span><span><small>PLATFORM</small>Windows / macOS / Linux</span></div><div className="demo-detail-actions">{state.installed[selected.id] ? <><span className="demo-installed"><Icon name="check" size={16} /> Installed</span><button type="button" className="demo-button primary" disabled={busyGame(selected.id)} onClick={() => setModsId(selected.id)}><Icon name="mods" size={17} /> Apply mods</button></> : <button type="button" className="demo-button primary" onClick={() => busyGame(selected.id) ? navigate("downloads") : download(selected)}><Icon name="download" size={17} />{busyGame(selected.id) ? "View download" : "Download"}</button>}</div><div className="demo-mod-summary"><h3><Icon name="mods" size={17} /> Mods & extras</h3>{selected.mods.map(mod => <span key={mod.id}>{mod.name}{state.installed[selected.id]?.appliedModIds.includes(mod.id) && <small>Applied</small>}</span>)}</div><p className="demo-disclaimer">Preview only. No real game files or mods are downloaded.</p></div></div>
+                <div className="demo-details"><Artwork game={selected} className="detail-art" /><div className="demo-details-copy"><span className="demo-tag">Adventure</span><p>{selected.description}</p><div className="demo-metadata"><span><small>FILE SIZE</small>{selected.sizeLabel}</span><span><small>PLATFORM</small>Windows / macOS / Linux</span></div><div className="demo-detail-actions">{state.installed[selected.id] ? <><span className="demo-installed"><Icon name="check" size={16} /> Installed</span><button type="button" className="demo-button primary" disabled={busyGame(selected.id)} onClick={() => setModsId(selected.id)}><Icon name="mods" size={17} /> Apply mods</button></> : <button type="button" className="demo-button primary" onClick={() => busyGame(selected.id) ? navigate("downloads") : download(selected)}><Icon name="download" size={17} />{busyGame(selected.id) ? "View download" : "Download"}</button>}</div><div className="demo-mod-summary"><h3><Icon name="mods" size={17} /> Mods & extras</h3>{selected.mods.map(mod => <span key={mod.id}>{mod.name}{state.installed[selected.id]?.appliedModIds.includes(mod.id) && <small>Applied</small>}</span>)}</div></div></div>
               ) : page === "home" ? (
-                <div className="demo-game-grid">{visibleGames.map(game => <button type="button" className="demo-game-card" key={game.id} onClick={() => details(game)} aria-label={`View ${game.name}`}><Artwork game={game} /><span className="demo-card-name">{game.name}</span><span className="demo-card-caption">{state.installed[game.id] ? "Installed" : "Discover something new"}</span></button>)}{!visibleGames.length && <p className="demo-empty">No games match your search.</p>}</div>
+                <div className="demo-game-grid">{visibleGames.map(game => <button type="button" className="demo-game-card" key={game.id} onClick={() => details(game)} aria-label={`View ${game.name}`}><Artwork game={game} /><span className="demo-card-name">{game.name}</span></button>)}{!visibleGames.length && <p className="demo-empty">No games match your search.</p>}</div>
               ) : page === "library" ? (
-                <><div className="demo-library-filter">Installed <span>{Object.keys(state.installed).length}</span></div><div className="demo-library-grid">{installedGames.map(game => <article className="demo-library-card" key={game.id}><button type="button" className="demo-library-art" onClick={() => details(game)} aria-label={`View ${game.name}`}><Artwork game={game} /><span>View details <Icon name="back" size={17} /></span></button><div className="demo-library-info"><h3>{game.name}</h3><span className="demo-installed"><Icon name="check" size={13} />Installed</span><button type="button" className="demo-button secondary" disabled={busyGame(game.id)} onClick={() => setModsId(game.id)}><Icon name="mods" size={15} />{busyGame(game.id) ? "Installing mods…" : "Mods"}</button></div></article>)}{!installedGames.length && <p className="demo-empty">{search ? "No installed games match your search." : "Your installed games will appear here. Try a download from Home."}</p>}</div></>
+                <><div className="demo-library-filter">Installed <span>{Object.keys(state.installed).length}</span></div><div className="demo-library-grid">{installedGames.map(game => <article className="demo-library-card" key={game.id}><button type="button" className="demo-library-art" onClick={() => { setPlayingId(playingId === game.id ? null : game.id); setNotice(playingId === game.id ? `${game.name} stopped.` : `${game.name} is running in the preview.`); }} aria-label={`${playingId === game.id ? "Stop" : "Play"} ${game.name}`}><Artwork game={game} /><span>{playingId === game.id ? "Stop" : "Play"} <Icon name={playingId === game.id ? "pause" : "play"} size={20} /></span></button><div className="demo-library-info"><h3>{game.name}</h3><span className="demo-installed"><Icon name="check" size={13} />Installed</span></div></article>)}{!installedGames.length && <p className="demo-empty">{search ? "No installed games match your search." : "Your installed games will appear here."}</p>}</div></>
               ) : (
                 <><div className="demo-queue-title"><h3>Download queue</h3><span>{state.jobs.length}</span></div><div className="demo-download-list">{state.jobs.map(job => {
                   const game = DEMO_GAMES.find(game => game.id === job.gameId)!;
                   const isMod = job.kind === "mod";
                   const label = isMod ? "Applying mods" : "Downloading";
-                  return <article className="demo-download-card" key={job.id}><Artwork game={game} /><div className="demo-job-info"><div className="demo-job-heading"><h3>{game.name}{isMod && <span> · Mods</span>}</h3><span className={`demo-job-status ${job.status}`}>{job.status === "downloading" ? label : job.status === "completed" ? (isMod ? "Mods applied" : "Installed") : job.status === "paused" ? "Paused" : "Cancelled"}</span></div><div className="demo-job-stats"><span>{isMod ? job.modIds.map(id => game.mods.find(mod => mod.id === id)?.name).join(", ") : `Demo download · ${game.sizeLabel}`}</span><span>{job.progress}%</span></div><div className="demo-progress" role="progressbar" aria-label={`${game.name}${isMod ? " mod" : " download"} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={job.progress}><span style={{ width: `${job.progress}%` }} /></div></div><div className="demo-job-actions">{job.status === "downloading" && <button type="button" className="demo-icon-button" aria-label={`Pause ${game.name}${isMod ? " mods" : ""}`} onClick={() => dispatch({ type: "pause", jobId: job.id })}><Icon name="pause" size={16} /></button>}{job.status === "paused" && <button type="button" className="demo-icon-button" aria-label={`Resume ${game.name}${isMod ? " mods" : ""}`} onClick={() => dispatch({ type: "resume", jobId: job.id })}><Icon name="play" size={16} /></button>}{["paused", "downloading"].includes(job.status) && <button type="button" className="demo-icon-button cancel" aria-label={`Cancel ${game.name}${isMod ? " mods" : ""}`} onClick={() => dispatch({ type: "cancel", jobId: job.id })}><Icon name="close" size={17} /></button>}{job.status === "completed" && <button type="button" className="demo-button secondary" onClick={() => navigate("library")}>View in Library</button>}</div></article>;
-                })}{!state.jobs.length && <div className="demo-empty"><Icon name="download" size={27} /><h3>A little quiet here.</h3><p>Open a game on Home and try a simulated download.</p><button type="button" className="demo-button secondary" onClick={() => navigate("home")}>Explore games</button></div>}</div></>
+                  return <article className="demo-download-card" key={job.id}><Artwork game={game} /><div className="demo-job-info"><div className="demo-job-heading"><h3>{game.name}{isMod && <span> · Mods</span>}</h3><span className={`demo-job-status ${job.status}`}>{job.status === "downloading" ? label : job.status === "completed" ? (isMod ? "Mods applied" : "Installed") : job.status === "paused" ? "Paused" : "Cancelled"}</span></div><div className="demo-job-stats"><span>{isMod ? job.modIds.map(id => game.mods.find(mod => mod.id === id)?.name).join(", ") : game.sizeLabel}</span><span>{job.progress}%</span></div><div className="demo-progress" role="progressbar" aria-label={`${game.name}${isMod ? " mod" : " download"} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={job.progress}><span style={{ width: `${job.progress}%` }} /></div></div><div className="demo-job-actions">{job.status === "downloading" && <button type="button" className="demo-icon-button" aria-label={`Pause ${game.name}${isMod ? " mods" : ""}`} onClick={() => dispatch({ type: "pause", jobId: job.id })}><Icon name="pause" size={16} /></button>}{job.status === "paused" && <button type="button" className="demo-icon-button" aria-label={`Resume ${game.name}${isMod ? " mods" : ""}`} onClick={() => dispatch({ type: "resume", jobId: job.id })}><Icon name="play" size={16} /></button>}{["paused", "downloading"].includes(job.status) && <button type="button" className="demo-icon-button cancel" aria-label={`Cancel ${game.name}${isMod ? " mods" : ""}`} onClick={() => dispatch({ type: "cancel", jobId: job.id })}><Icon name="close" size={17} /></button>}{job.status === "completed" && <button type="button" className="demo-button secondary" onClick={() => navigate("library")}>View in Library</button>}</div></article>;
+                })}</div></>
               )}
             </div>
           </div>
         </div>
-        <div className="demo-statusbar"><span className="demo-simulation-label"><i /> No real downloads · demo data only</span><button type="button" onClick={reset}>Reset demo <span aria-hidden="true">↺</span></button></div>
+        {modsGame && <ModsDialog key={modsGame.id} game={modsGame} applied={state.installed[modsGame.id]?.appliedModIds ?? []} onApply={applyMods} onClose={() => setModsId(null)} />}
       </div>
-      <p className="demo-instruction">Browse a game, try a download, or open Library to apply mods. Changes reset when you reload.</p>
       <p className="sr-only" role="status" aria-live="polite">{notice} {completed > 0 ? `${completed} demo ${completed === 1 ? "job" : "jobs"} completed.` : ""}</p>
-      {modsGame && <ModsDialog key={modsGame.id} game={modsGame} applied={state.installed[modsGame.id]?.appliedModIds ?? []} onApply={applyMods} onClose={() => setModsId(null)} />}
+
     </section>
   );
 }

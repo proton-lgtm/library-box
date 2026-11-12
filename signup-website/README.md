@@ -2,6 +2,14 @@
 
 Standalone Next.js/TypeScript app for collecting **email waitlist signups only**. No passwords, Auth accounts, verification emails, analytics, mailing integration, or admin dashboard. The Electron app and its dependencies are independent.
 
+## Interactive preview
+
+The landing page uses self-hosted Inter, a centered heading, short subheading and compact email/Join form above a working desktop preview. Consent and Turnstile verification remain below the signup row.
+
+The preview is entirely local: browse/search mock games, open Details, start a simulated download, pause/resume/cancel it, and find completed games in Library. One sample game is preinstalled so mods can be tried immediately. Select **Mods → Apply mods** to open Downloads and watch the simulated mod installation. Applied mods are marked after completion; cancelling never installs anything. Reloading the browser restores the initial sample state. No preview action calls the signup API, Electron IPC, downloads a file, launches a game or saves anything to Supabase/localStorage.
+
+The demo keeps its fixed height without internal scrolling. Catalog card sizes and gaps are preserved, with overflow clipped rather than resized or paginated. On narrow screens, navigation moves to a top row and signup controls stack. Decorative preview labels and both footers are intentionally omitted. All actions are real keyboard-accessible controls; mod selection uses a focus-trapped dialog and backdrop contained within the app preview, with focus return on close.
+
 ## Local development
 
 Use Node.js 22.18+ (Node 24 recommended) and npm. From the repository root:
