@@ -29,7 +29,6 @@ export default function Home() {
         </section>
         <DesktopDemo />
       </main>
-      <footer className="site-footer"><span>Playmart · A little less friction. A lot more play.</span><div>{privacyUrl && <a href={privacyUrl} target="_blank" rel="noopener noreferrer">Privacy policy<span className="sr-only"> (opens in a new tab)</span></a>}<span>© {new Date().getFullYear()} Playmart</span></div></footer>
     </>
   );
 }

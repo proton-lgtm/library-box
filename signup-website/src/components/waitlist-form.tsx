@@ -107,8 +107,7 @@ export function WaitlistForm({ siteKey, privacyUrl }: { siteKey: string; privacy
           <input id="email" name="email" type="email" autoComplete="email" placeholder="you@example.com" required maxLength={254} value={email} onChange={(event) => setEmail(event.target.value)} disabled={state === "pending" || state === "success"} aria-describedby="signup-message" />
         </div>
         <button className="submit-button" type="submit" disabled={!configured || !consent || !token || state === "pending" || state === "success"}>
-          {state === "pending" ? "Joining…" : state === "success" ? "You’re on the list" : "Join the waitlist"}
-          <span aria-hidden="true">{state === "success" ? "✓" : "→"}</span>
+          {state === "pending" ? "Joining…" : state === "success" ? "You’re on the list" : "Join"}
         </button>
         </div>
         <div className="honeypot" aria-hidden="true">
@@ -128,7 +127,6 @@ export function WaitlistForm({ siteKey, privacyUrl }: { siteKey: string; privacy
         {!configured && <p className="configuration-note">Signups are not open yet. The privacy policy and security check must be configured first.</p>}
         <p id="signup-message" className={`form-message ${state}`} role={state === "error" ? "alert" : "status"} aria-live="polite">{message}</p>
       </form>
-      <p className="form-footnote">Just your email. No password. No account to create.</p>
     </div>
   );
 }

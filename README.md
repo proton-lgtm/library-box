@@ -58,6 +58,8 @@ npm run clear:electron-storage
 
 Close the app first, then type `CLEAR` when prompted. Use `npm run clear:electron-storage -- --dry-run` to inspect the target, or append `-- --yes` to skip confirmation.
 
+The Electron window uses `assets/logo.png`. After replacing this square logo (at least 1024 × 1024 pixels), run `npm run icons` to regenerate the Windows, macOS, and Linux package icons in `assets/icons/` before packaging.
+
 Create a packaged application for the current host:
 
 ```powershell

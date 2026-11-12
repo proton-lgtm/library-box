@@ -80,7 +80,7 @@ export type DemoAction =
   | { type: "reset" };
 
 export function createDemoState(): DemoState {
-  return { jobs: [], installed: { "cloud-gardens": { appliedModIds: [] } } };
+  return { jobs: [], installed: {} };
 }
 
 /** Pure transitions; the UI may dispatch tick every 700 ms for +10% progress. */

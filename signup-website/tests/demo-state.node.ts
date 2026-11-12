@@ -9,6 +9,10 @@ const download: DemoAction = { type: "download", gameId: downloadable.id };
 const mods = preinstalled.mods.map(({ id }) => id);
 const apply: DemoAction = { type: "apply-mods", gameId: preinstalled.id, modIds: mods };
 
+function installedState(): DemoState {
+  return { jobs: [], installed: { [preinstalled.id]: { appliedModIds: [] } } };
+}
+
 function ticks(state: DemoState, count = 10): DemoState {
   for (let i = 0; i < count; i++) state = demoReducer(state, { type: "tick" });
   return state;
@@ -34,14 +38,12 @@ test("six typed fixtures have unique IDs, display metadata, and valid mods", () 
   }
 });
 
-test("initial state contains exactly one preinstalled game and is freshly allocated", () => {
+test("initial state has no installed games and is freshly allocated", () => {
   const state = createDemoState();
-  const expected: DemoState = { jobs: [], installed: { [preinstalled.id]: { appliedModIds: [] } } };
+  const expected: DemoState = { jobs: [], installed: {} };
   assert.deepEqual(state, expected);
-  state.installed[preinstalled.id].appliedModIds.push("changed");
-  state.jobs.push({ id: "external", gameId: preinstalled.id, kind: "game", modIds: [], status: "paused", progress: 0 });
-  assert.deepEqual(createDemoState().jobs, []);
-  assert.deepEqual(createDemoState().installed[preinstalled.id].appliedModIds, []);
+  state.installed[preinstalled.id] = { appliedModIds: ["changed"] };
+  assert.deepEqual(createDemoState(), { jobs: [], installed: {} });
 });
 
 test("download progresses by ten and installs only at completion", () => {
@@ -88,7 +90,7 @@ for (const paused of [false, true]) {
 }
 
 test("unknown games and already-installed downloads are ignored", () => {
-  const state = createDemoState();
+  const state = installedState();
   for (const gameId of ["unknown", "__proto__", "constructor", preinstalled.id]) {
     assert.strictEqual(demoReducer(state, { type: "download", gameId }), state);
     if (gameId !== preinstalled.id) {
@@ -99,7 +101,7 @@ test("unknown games and already-installed downloads are ignored", () => {
 
 test("unfinished same-game work is rejected, including paused jobs and cross-kind work", () => {
   for (const action of [download, apply]) {
-    let state = demoReducer(createDemoState(), action);
+    let state = demoReducer(installedState(), action);
     for (const paused of [false, true]) {
       if (paused) state = demoReducer(state, { type: "pause", jobId: "job-1" });
       assert.strictEqual(demoReducer(state, action), state);
@@ -118,7 +120,7 @@ test("mod jobs require an installed game and reject empty or invalid selections 
 });
 
 test("mods are deduplicated, applied only on completion, and accumulated without repeats", () => {
-  let state = demoReducer(createDemoState(), { ...apply, modIds: [mods[0], mods[0]] });
+  let state = demoReducer(installedState(), { ...apply, modIds: [mods[0], mods[0]] });
   assert.equal(state.jobs[0].kind, "mod");
   assert.deepEqual(state.jobs[0].modIds, [mods[0]]);
   state = ticks(state, 9);
@@ -134,7 +136,7 @@ test("mods are deduplicated, applied only on completion, and accumulated without
 });
 
 test("paused and cancelled mod jobs preserve previously applied mods", () => {
-  let state = ticks(demoReducer(createDemoState(), { ...apply, modIds: [mods[0]] }));
+  let state = ticks(demoReducer(installedState(), { ...apply, modIds: [mods[0]] }));
   state = ticks(demoReducer(state, { ...apply, modIds: [mods[1]] }), 9);
   state = demoReducer(state, { type: "pause", jobId: "job-2" });
   assert.strictEqual(ticks(state), state);
@@ -145,7 +147,7 @@ test("paused and cancelled mod jobs preserve previously applied mods", () => {
 });
 
 test("different games progress concurrently and paused jobs do not block others", () => {
-  let state = demoReducer(demoReducer(createDemoState(), download), apply);
+  let state = demoReducer(demoReducer(installedState(), download), apply);
   state = demoReducer(state, { type: "pause", jobId: "job-1" });
   state = ticks(state);
   assert.equal(state.jobs[0].progress, 0);
@@ -153,7 +155,7 @@ test("different games progress concurrently and paused jobs do not block others"
   assert.deepEqual(state.installed[preinstalled.id].appliedModIds, mods);
   state = ticks(demoReducer(state, { type: "resume", jobId: "job-1" }));
   assert.ok(state.installed[downloadable.id]);
-  const concurrent = ticks(demoReducer(demoReducer(createDemoState(), download), apply));
+  const concurrent = ticks(demoReducer(demoReducer(installedState(), download), apply));
   assert.ok(concurrent.jobs.every(({ status }) => status === "completed"));
   assert.ok(concurrent.installed[downloadable.id]);
   assert.deepEqual(concurrent.installed[preinstalled.id].appliedModIds, mods);
@@ -173,7 +175,7 @@ test("invalid lifecycle transitions and missing job IDs are no-ops", () => {
 });
 
 test("transitions are deterministic and never mutate states, action arrays, or fixtures", () => {
-  const original = createDemoState();
+  const original = installedState();
   const action = { ...apply, modIds: [...mods] };
   freeze(original);
   freeze(action);
@@ -186,19 +188,19 @@ test("transitions are deterministic and never mutate states, action arrays, or f
   const resumed = demoReducer(paused, { type: "resume", jobId: "job-1" });
   freeze(resumed);
   const completed = ticks(resumed);
-  assert.deepEqual(completed, ticks(demoReducer(createDemoState(), action)));
-  assert.deepEqual(original, createDemoState());
+  assert.deepEqual(completed, ticks(demoReducer(installedState(), action)));
+  assert.deepEqual(original, installedState());
   assert.deepEqual(queued.installed, original.installed);
   assert.deepEqual(queued.jobs[0].progress, 0);
   assert.deepEqual(action.modIds, mods);
 });
 
 test("reset restores a fresh initial state and restarts deterministic IDs", () => {
-  const state = ticks(demoReducer(demoReducer(createDemoState(), download), apply));
+  const state = ticks(demoReducer(demoReducer(installedState(), download), apply));
   const reset = demoReducer(state, { type: "reset" });
   assert.deepEqual(reset, createDemoState());
   assert.notStrictEqual(reset, demoReducer(state, { type: "reset" }));
-  reset.installed[preinstalled.id].appliedModIds.push("changed");
+  reset.installed[preinstalled.id] = { appliedModIds: ["changed"] };
   assert.deepEqual(demoReducer(state, { type: "reset" }), createDemoState());
   assert.equal(demoReducer(demoReducer(state, { type: "reset" }), download).jobs[0].id, "job-1");
 });
