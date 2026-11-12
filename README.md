@@ -76,7 +76,7 @@ npm run package:linux
 
 The Windows release workflow uses the GitHub Actions `prod` environment. Configure its `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` secrets before publishing a release; the packaging step validates their presence and embeds these public client settings during the build. Never use a service-role/secret key for the desktop app.
 
-Build native packages on their target operating system for the most reliable results. macOS signing/notarization requires macOS and Apple developer tooling; this project does not configure signing credentials. Linux package formats may require distribution-specific build dependencies. Windows, macOS, and Linux packages have not all been validated from one machine.
+Build native packages on their target operating system for the most reliable results. macOS signing/notarization requires macOS and Apple developer tooling; this project does not configure signing credentials. Linux package formats may require distribution-specific build dependencies. Windows, MacOS, and Linux packages have not all been validated from one machine.
 
 ## Using the library
 
