@@ -6,6 +6,15 @@ export type WaitlistDependencies = {
   env: Readonly<Record<string, string | undefined>>;
   fetch: typeof globalThis.fetch;
   timeoutMs?: number;
+  reportFailure?: (diagnostic: WaitlistDiagnostic) => void;
+};
+
+export type WaitlistDiagnostic = {
+  stage: "configuration" | "turnstile" | "supabase";
+  reason: "invalid_configuration" | "provider_http_error" | "invalid_provider_response" | "verification_unavailable" | "request_failed_or_timed_out";
+  missingVariables?: string[];
+  httpStatus?: number;
+  databaseCode?: string;
 };
 
 type Config = {
@@ -153,8 +162,18 @@ export async function handleWaitlist(
   if (typeof body.turnstileToken !== "string" ||
     !body.turnstileToken.trim() || body.turnstileToken.length > MAX_TOKEN_LENGTH) return response(400);
 
+  const report = (diagnostic: WaitlistDiagnostic) => {
+    try { dependencies.reportFailure?.(diagnostic); } catch { /* Logging must not change the response. */ }
+  };
   const config = readConfig(dependencies.env);
-  if (!config) return response(503);
+  if (!config) {
+    report({ stage: "configuration", reason: "invalid_configuration", missingVariables: [
+      "SUPABASE_URL", "SUPABASE_SECRET_KEY", "TURNSTILE_SECRET_KEY",
+      "TURNSTILE_EXPECTED_HOSTNAMES", "PRIVACY_POLICY_URL",
+    ].filter(name => !dependencies.env[name]?.trim()) });
+    return response(503);
+  }
+  let stage: "turnstile" | "supabase" = "turnstile";
   const timeoutMs = dependencies.timeoutMs ?? PROVIDER_TIMEOUT_MS;
   try {
     const verification = await withTimeout(async (signal) => {
@@ -166,22 +185,33 @@ export async function handleWaitlist(
         cache: "no-store",
         redirect: "error",
       });
-      if (!result.ok) throw new Error("Verification unavailable");
+      if (!result.ok) {
+        report({ stage, reason: "provider_http_error", httpStatus: result.status });
+        return null;
+      }
       const payload: unknown = await result.json();
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid verification response");
       return payload as Record<string, unknown>;
     }, timeoutMs);
-    if (typeof verification.success !== "boolean") return response(503);
+    if (verification === null) return response(503);
+    if (typeof verification.success !== "boolean") {
+      report({ stage, reason: "invalid_provider_response" });
+      return response(503);
+    }
     if (!verification.success) {
       const errors = verification["error-codes"];
       if (Array.isArray(errors) && errors.some((code) =>
         ["internal-error", "missing-input-secret", "invalid-input-secret", "bad-request"].includes(code),
-      )) return response(503);
+      )) {
+        report({ stage, reason: "verification_unavailable" });
+        return response(503);
+      }
       return response(400);
     }
     if (verification.action !== "waitlist" || typeof verification.hostname !== "string" ||
       !config.hostnames.has(verification.hostname.toLowerCase())) return response(400);
 
+    stage = "supabase";
     return await withTimeout(async (signal) => {
       const result = await dependencies.fetch(`${config.supabaseUrl}/rest/v1/waitlist_signups`, {
         method: "POST",
@@ -199,13 +229,18 @@ export async function handleWaitlist(
         redirect: "error",
       });
       if (result.ok) return response(200);
-      if (result.status === 409) {
+      let databaseCode: string | undefined;
+      try {
         const error: unknown = await result.json();
-        if (error && typeof error === "object" && "code" in error && error.code === "23505") return response(200);
-      }
+        if (error && typeof error === "object" && "code" in error && typeof error.code === "string" &&
+          /^(?:[0-9A-Z]{5}|PGRST[0-9]{3})$/.test(error.code)) databaseCode = error.code;
+      } catch { /* Never log provider messages or response bodies. */ }
+      if (result.status === 409 && databaseCode === "23505") return response(200);
+      report({ stage, reason: "provider_http_error", httpStatus: result.status, ...(databaseCode ? { databaseCode } : {}) });
       return response(503);
     }, timeoutMs);
   } catch {
+    report({ stage, reason: "request_failed_or_timed_out" });
     return response(503);
   }
 }

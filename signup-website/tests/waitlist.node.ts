@@ -248,3 +248,29 @@ test("times out verification and insertion, aborting each provider request", asy
     assert.equal(signal?.aborted, true);
   }
 });
+
+
+test("diagnostics identify missing configuration without logging input or secrets", async () => {
+  const diagnostics: unknown[] = [];
+  const mock = mockFetch([]);
+  await check(await handleWaitlist(request(), { env: {}, fetch: mock.fetch, reportFailure: d => diagnostics.push(d) }), 503);
+  assert.deepEqual(diagnostics, [{ stage: "configuration", reason: "invalid_configuration", missingVariables: ["SUPABASE_URL", "SUPABASE_SECRET_KEY", "TURNSTILE_SECRET_KEY", "TURNSTILE_EXPECTED_HOSTNAMES", "PRIVACY_POLICY_URL"] }]);
+  assert.equal(JSON.stringify(diagnostics).includes(valid.email), false);
+});
+
+test("diagnostics report only the database status and safe error code", async () => {
+  const diagnostics: unknown[] = [];
+  const mock = mockFetch([Response.json(verification), Response.json({code:"42501", message:"private provider details", details:valid.email}, {status:403})]);
+  await check(await handleWaitlist(request(), {env, fetch:mock.fetch, reportFailure:d=>diagnostics.push(d)}),503);
+  assert.deepEqual(diagnostics,[{stage:"supabase",reason:"provider_http_error",httpStatus:403,databaseCode:"42501"}]);
+  const output=JSON.stringify(diagnostics);
+  for(const secret of [valid.email, valid.turnstileToken, env.SUPABASE_SECRET_KEY, env.TURNSTILE_SECRET_KEY, "private provider details"]) assert.equal(output.includes(secret),false);
+});
+
+test("diagnostics distinguish Turnstile HTTP failures and never change public errors", async () => {
+  const diagnostics: unknown[]=[];
+  const mock=mockFetch([new Response(null,{status:502})]);
+  await check(await handleWaitlist(request(),{env,fetch:mock.fetch,reportFailure:d=>diagnostics.push(d)}),503);
+  assert.deepEqual(diagnostics,[{stage:"turnstile",reason:"provider_http_error",httpStatus:502}]);
+  await check(await handleWaitlist(request(),{env:{},fetch:mock.fetch,reportFailure:()=>{throw Error("logging failed");}}),503);
+});
