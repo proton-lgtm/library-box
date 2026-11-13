@@ -1,6 +1,7 @@
 ﻿import Link from "next/link";
 import { DesktopDemo } from "@/components/desktop-demo";
 import { WaitlistForm } from "@/components/waitlist-form";
+import { getWaitlistCount } from "@/lib/waitlist";
 
 export const dynamic = "force-dynamic";
 
@@ -12,8 +13,9 @@ function privacyPolicyUrl(value: string | undefined) {
   } catch { return ""; }
 }
 
-export default function Home() {
+export default async function Home() {
   const privacyUrl = privacyPolicyUrl(process.env.PRIVACY_POLICY_URL);
+  const initialCount = await getWaitlistCount({ env: process.env, fetch: globalThis.fetch });
   return (
     <>
       <a className="skip-link" href="#main">Skip to content</a>
@@ -25,7 +27,7 @@ export default function Home() {
         <section className="hero" aria-labelledby="hero-title">
           <h1 id="hero-title">Your games. All in one place.</h1>
           <p className="hero-description">A new home for your game library.<br />Join the waitlist, then take a look around.</p>
-          <WaitlistForm siteKey={process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || ""} privacyUrl={privacyUrl} />
+          <WaitlistForm siteKey={process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || ""} privacyUrl={privacyUrl} initialCount={initialCount} />
         </section>
         <DesktopDemo />
       </main>

@@ -21,7 +21,7 @@ declare global {
   interface Window { turnstile?: TurnstileApi }
 }
 
-export function WaitlistForm({ siteKey, privacyUrl }: { siteKey: string; privacyUrl: string }) {
+export function WaitlistForm({ siteKey, privacyUrl, initialCount }: { siteKey: string; privacyUrl: string; initialCount: number | null }) {
   const container = useRef<HTMLDivElement>(null);
   const widget = useRef<string | null>(null);
   const busy = useRef(false);
@@ -31,6 +31,34 @@ export function WaitlistForm({ siteKey, privacyUrl }: { siteKey: string; privacy
   const [consent, setConsent] = useState(false);
   const [state, setState] = useState<"idle" | "pending" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
+  const [count, setCount] = useState<number | null>(initialCount);
+  const [celebrating, setCelebrating] = useState(false);
+  const joined = state === "success";
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    async function refreshCount() {
+      try {
+        const response = await fetch("/api/waitlist", { signal: controller.signal, cache: "no-store" });
+        if (!response.ok) return;
+        const payload: unknown = await response.json();
+        if (payload && typeof payload === "object" && "count" in payload &&
+          typeof payload.count === "number" && Number.isSafeInteger(payload.count) && payload.count >= 0) {
+          setCount(payload.count);
+        }
+      } catch { /* Count availability must not block joining. */ }
+      finally { clearTimeout(timeout); }
+    }
+    void refreshCount();
+    return () => { clearTimeout(timeout); controller.abort(); };
+  }, [joined]);
+
+  useEffect(() => {
+    if (!celebrating) return;
+    const timeout = setTimeout(() => setCelebrating(false), 3500);
+    return () => clearTimeout(timeout);
+  }, [celebrating]);
   const configured = Boolean(siteKey && privacyUrl);
   const challengeError = useCallback(() => {
     setToken("");
@@ -85,6 +113,7 @@ export function WaitlistForm({ siteKey, privacyUrl }: { siteKey: string; privacy
         return;
       }
       setState("success");
+      setCelebrating(!window.matchMedia("(prefers-reduced-motion: reduce)").matches);
       setMessage("You’re on the list. If this email is already registered, you’re all set.");
     } catch {
       setState("error");
@@ -99,6 +128,21 @@ export function WaitlistForm({ siteKey, privacyUrl }: { siteKey: string; privacy
 
   return (
     <div className="waitlist" id="join">
+      {celebrating && (
+        <div className="signup-confetti" aria-hidden="true">
+          {Array.from({ length: 48 }, (_, index) => (
+            <i key={index} style={{
+              left: `${(index * 37) % 100}%`,
+              backgroundColor: ["#a380f2", "#9de5c4", "#ffd580", "#f7a8d8"][index % 4],
+              animationDelay: `${(index % 8) * 70}ms`,
+              transform: `rotate(${index * 29}deg)`,
+            }} />
+          ))}
+        </div>
+      )}
+      <p className="waitlist-count" aria-live="polite" aria-atomic="true">
+        {count === null ? "Join the waitlist" : <>Join <strong>{count.toLocaleString("en-US")}</strong> {count === 1 ? "person" : "people"} on the waitlist</>}
+      </p>
       <form onSubmit={submit} aria-busy={state === "pending"}>
         <label className="sr-only" htmlFor="email">Email address</label>
         <div className="signup-row">

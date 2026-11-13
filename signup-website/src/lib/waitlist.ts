@@ -140,6 +140,32 @@ async function withTimeout<T>(
   }
 }
 
+export async function getWaitlistCount(dependencies: WaitlistDependencies): Promise<number | null> {
+  const config = readConfig(dependencies.env);
+  if (!config) return null;
+  try {
+    return await withTimeout(async (signal) => {
+      const result = await dependencies.fetch(`${config.supabaseUrl}/rest/v1/rpc/waitlist_signup_count`, {
+        method: "POST",
+        headers: {
+          apikey: config.supabaseKey,
+          ...(!config.supabaseKey.startsWith("sb_secret_")
+            ? { Authorization: `Bearer ${config.supabaseKey}` }
+            : {}),
+        },
+        signal,
+        cache: "no-store",
+        redirect: "error",
+      });
+      if (!result.ok) return null;
+      const count: unknown = await result.json();
+      return typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : null;
+    }, dependencies.timeoutMs ?? PROVIDER_TIMEOUT_MS);
+  } catch {
+    return null;
+  }
+}
+
 export async function handleWaitlist(
   request: Request,
   dependencies: WaitlistDependencies,

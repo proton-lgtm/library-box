@@ -4,7 +4,7 @@ Standalone Next.js/TypeScript app for collecting **email waitlist signups only**
 
 ## Interactive preview
 
-The landing page uses self-hosted Inter, a centered heading, short subheading and compact email/Join form above a working desktop preview. Consent and Turnstile verification remain below the signup row.
+The landing page uses self-hosted Inter, a centered heading, short subheading and compact email/Join form above a working desktop preview. Consent and Turnstile verification remain below the signup row. Successful submissions trigger a short decorative confetti animation (disabled for reduced-motion preferences). The form renders the actual signup total with the initial server response, formatted like “Join 2,567 people on the waitlist”, so it is visible before browser JavaScript loads. It refreshes after success without incrementing duplicates locally. If the count is unavailable, it shows “Join the waitlist” instead of an invented number.
 
 The preview is entirely local: browse/search mock games, open Details, start a simulated download, pause/resume/cancel it, and find completed games in Library. One sample game is preinstalled so mods can be tried immediately. Select **Mods → Apply mods** to open Downloads and watch the simulated mod installation. Applied mods are marked after completion; cancelling never installs anything. Reloading the browser restores the initial sample state. No preview action calls the signup API, Electron IPC, downloads a file, launches a game or saves anything to Supabase/localStorage.
 
@@ -26,7 +26,7 @@ Open http://localhost:3000. The page runs without credentials, but submission re
 ## Supabase
 
 1. Select the Supabase project you want to use. Either use the existing project's database or create a separate project manually for the waitlist.
-2. Run [`20261111220000_waitlist_signups.sql`](../supabase/migrations/20261111220000_waitlist_signups.sql) in that project's SQL editor. A separate waitlist project needs only this migration, not the game catalog migrations. If using Supabase CLI migration tooling on the existing project, follow its normal pending migration workflow instead.
+2. Run [`20261111220000_waitlist_signups.sql`](../supabase/migrations/20261111220000_waitlist_signups.sql), then [`20261113220000_waitlist_signup_count.sql`](../supabase/migrations/20261113220000_waitlist_signup_count.sql) in that project's SQL editor. A separate waitlist project needs only these two migrations, not the game catalog migrations. If using Supabase CLI migration tooling on the existing project, follow its normal pending migration workflow instead. The second migration grants the server role access to a count-only function; no role gains read access to individual signup records.
 3. Set `SUPABASE_URL` and a **server-only** secret key in the website's environment. A modern `sb_secret_` key or the legacy service-role key is supported. A publishable/anonymous key is intentionally insufficient.
 
 The dedicated `public.waitlist_signups` table stores a UUID, normalized unique email, consent timestamp and creation timestamp. RLS is enabled; `anon` and `authenticated` cannot read or write it. The server role receives column-level insert permissions only on this table. Secret/service-role keys still have powerful access to other tables in their project: use a separate project when stronger isolation is required. Do not broaden access by adding public policies. This app has no list/export endpoint.
@@ -68,6 +68,8 @@ No infrastructure has been provisioned or deployed automatically.
 No additional `vercel.json` is required. Keep the form and `/api/waitlist` on the same origin.
 
 ## Submission behavior
+
+`GET /api/waitlist` returns only `{"count":2567}` from the server-only aggregate function, with caching disabled. If unavailable, it returns `503 {"count":null}`; submissions remain independent of count availability. No emails or records are returned.
 
 `POST /api/waitlist`, JSON body up to 4 KiB:
 
