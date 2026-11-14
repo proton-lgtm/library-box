@@ -40,6 +40,22 @@ describe("release versions", () => {
   });
 });
 
+describe("cross-platform update packages", () => {
+  const { build, dependencies } = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8"));
+  it("uses a public GitHub updater feed without embedded credentials", () => {
+    expect(build.publish).toEqual({ provider: "github", owner: "proton-lgtm", repo: "library-box", releaseType: "release" });
+    expect(dependencies["electron-updater"]).toBeTruthy();
+  });
+  it("ships update-capable installers and architecture-qualified assets", () => {
+    expect(build.win.target).toEqual(expect.arrayContaining(["nsis", "portable"]));
+    expect(build.mac.target).toEqual(expect.arrayContaining(["dmg", "zip"]));
+    expect(build.linux.target).toEqual(expect.arrayContaining(["AppImage", "deb"]));
+    for (const target of [build.nsis, build.portable, build.mac, build.linux]) {
+      expect(target.artifactName).toContain("${arch}");
+    }
+  });
+});
+
 describe("Playmart data paths", () => {
   it("always uses Playmart desktop storage regardless of older folders", () => {
     const directory = temporaryDirectory();

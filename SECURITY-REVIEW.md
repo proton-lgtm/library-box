@@ -4,11 +4,9 @@ Reviewed on 2026-11-14. Read-only inspection of Git history and historical conte
 
 ## Findings
 
-| # | Severity | File | Lines | Vulnerability | Confidence |
-|---|----------|------|-------|---------------|------------|
-| 1 | ⚪ LOW | Git commit metadata (example: `9e1f6b51`) | N/A | Ordinary author/committer email is public attribution; privacy exposure, not a credential vulnerability | 10/10 |
+No confirmed actionable findings.
 
-One ordinary email identity appears on 27 commits reachable through the currently advertised public heads/tags. This is normal Git attribution and was not established to be accidental disclosure. Historical attribution remains recoverable even when later commits use a GitHub no-reply address.
+A non-no-reply author/committer email appears on 27 commits reachable through the reviewed public heads/tags (example: `9e1f6b51`). The repository owner subsequently confirmed that this is a fake email, so it is not treated as a personal-data exposure. Historical attribution remains recoverable even when later commits use a GitHub no-reply address.
 
 No confirmed live credentials or other accidental project PII were identified in the inspected text. This is not proof that none exists.
 

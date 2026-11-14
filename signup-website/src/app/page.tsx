@@ -1,21 +1,12 @@
 ﻿import Link from "next/link";
 import { DesktopDemo } from "@/components/desktop-demo";
-import { WaitlistForm } from "@/components/waitlist-form";
-import { getWaitlistCount } from "@/lib/waitlist";
+import { DesktopDownloads } from "@/components/desktop-downloads";
+import { getDesktopRelease } from "@/lib/releases";
 
-export const dynamic = "force-dynamic";
-
-function privacyPolicyUrl(value: string | undefined) {
-  if (!value) return "";
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password ? url.href : "";
-  } catch { return ""; }
-}
+export const revalidate = 900;
 
 export default async function Home() {
-  const privacyUrl = privacyPolicyUrl(process.env.PRIVACY_POLICY_URL);
-  const initialCount = await getWaitlistCount({ env: process.env, fetch: globalThis.fetch });
+  const release = await getDesktopRelease();
   return (
     <>
       <a className="skip-link" href="#main">Skip to content</a>
@@ -26,8 +17,8 @@ export default async function Home() {
       <main id="main">
         <section className="hero" aria-labelledby="hero-title">
           <h1 id="hero-title">Your games. All in one place.</h1>
-          <p className="hero-description">A new home for your game library.<br />Join the waitlist, then take a look around.</p>
-          <WaitlistForm siteKey={process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || ""} privacyUrl={privacyUrl} initialCount={initialCount} />
+          <p className="hero-description">A new home for your game library.<br />Download the desktop app, or take a look around.</p>
+          <DesktopDownloads release={release} />
         </section>
         <DesktopDemo />
       </main>

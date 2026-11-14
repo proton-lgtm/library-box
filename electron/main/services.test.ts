@@ -39,6 +39,12 @@ vi.mock("node:child_process", async (importOriginal) => {
 import { spawn } from "node:child_process";
 
 const temporaryDirectories: string[] = [];
+const launcherName = process.platform === "win32" ? "game.exe" : "game.sh";
+
+function writeLauncher(filePath: string, content: string): void {
+  writeFileSync(filePath, content);
+  if (process.platform !== "win32") chmodSync(filePath, 0o755);
+}
 
 function makeTempDirectory(): string {
   const directory = mkdtempSync(path.join(os.tmpdir(), "redline-test-"));
@@ -318,7 +324,7 @@ describe("SQLite library", () => {
     const installDir = path.join(root, "Sample Game");
     const archivePath = path.join(installDir, "game.zip");
     mkdirSync(installDir);
-    writeFileSync(path.join(installDir, "game.exe"), "game");
+    writeLauncher(path.join(installDir, launcherName), "game");
     writeFileSync(archivePath, "archive");
     writeFileSync(`${archivePath}.part`, "partial");
     const database = makeDatabase();
@@ -371,7 +377,7 @@ describe("SQLite library", () => {
     const installDir = path.join(root, "Sample Game");
     const archivePath = path.join(installDir, "game.zip");
     mkdirSync(installDir);
-    writeFileSync(path.join(installDir, "game.exe"), "game");
+    writeLauncher(path.join(installDir, launcherName), "game");
     writeFileSync(archivePath, "archive");
     const database = makeDatabase();
     database.syncCatalog([{
@@ -481,9 +487,9 @@ describe("download controls", () => {
     writeFileSync(path.join(installDir, "old-file.txt"), "stale installation");
     const source = path.join(root, "source");
     mkdirSync(source);
-    writeFileSync(path.join(source, "game.exe"), "fresh installation");
+    writeLauncher(path.join(source, launcherName), "fresh installation");
     const archivePath = path.join(root, "fresh-game.zip");
-    execFileSync(path7za, ["a", archivePath, "game.exe"], {
+    execFileSync(path7za, ["a", archivePath, launcherName], {
       cwd: source,
       windowsHide: true,
     });
@@ -505,7 +511,7 @@ describe("download controls", () => {
     await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"));
 
     expect(existsSync(path.join(installDir, "old-file.txt"))).toBe(false);
-    expect(existsSync(path.join(installDir, "game.exe"))).toBe(true);
+    expect(existsSync(path.join(installDir, launcherName))).toBe(true);
     database.close();
   });
 
@@ -573,9 +579,9 @@ describe("download controls", () => {
     const source = path.join(root, "source");
     mkdirSync(installDir);
     mkdirSync(source);
-    writeFileSync(path.join(source, "game.exe"), "resumed installation");
+    writeLauncher(path.join(source, launcherName), "resumed installation");
     const sourceArchive = path.join(root, "source.zip");
-    execFileSync(path7za, ["a", sourceArchive, "game.exe"], { cwd: source, windowsHide: true });
+    execFileSync(path7za, ["a", sourceArchive, launcherName], { cwd: source, windowsHide: true });
     const archiveBytes = await import("node:fs/promises").then(({ readFile }) => readFile(sourceArchive));
     const offset = Math.max(1, Math.floor(archiveBytes.length / 3));
     const archivePath = path.join(installDir, "game.zip");
@@ -629,9 +635,9 @@ describe("download controls", () => {
     const source = path.join(root, "source");
     mkdirSync(installDir);
     mkdirSync(source);
-    writeFileSync(path.join(source, "game.exe"), "restarted installation");
+    writeLauncher(path.join(source, launcherName), "restarted installation");
     const sourceArchive = path.join(root, "source.zip");
-    execFileSync(path7za, ["a", sourceArchive, "game.exe"], { cwd: source, windowsHide: true });
+    execFileSync(path7za, ["a", sourceArchive, launcherName], { cwd: source, windowsHide: true });
     const archiveBytes = await import("node:fs/promises").then(({ readFile }) => readFile(sourceArchive));
     const archivePath = path.join(installDir, "game.zip");
     writeFileSync(`${archivePath}.part`, archiveBytes.subarray(0, 20));
@@ -829,7 +835,7 @@ describe("download controls", () => {
     const modSource = path.join(root, "mod-source");
     mkdirSync(path.join(gameSource, "game"), { recursive: true });
     mkdirSync(path.join(modSource, "mod", "game"), { recursive: true });
-    writeFileSync(path.join(gameSource, "game.exe"), "launcher");
+    writeLauncher(path.join(gameSource, launcherName), "launcher");
     writeFileSync(path.join(gameSource, "game", "base.txt"), "base");
     writeFileSync(path.join(modSource, "mod", "game", "patch.rpy"), "patched");
     const gameArchive = path.join(root, "base.zip");
@@ -932,7 +938,7 @@ describe("download controls", () => {
     const source = path.join(root, "source");
     const nestedGameRoot = path.join(source, "Game Bundle", "Windows");
     mkdirSync(nestedGameRoot, { recursive: true });
-    writeFileSync(path.join(nestedGameRoot, "game.exe"), "launcher");
+    writeLauncher(path.join(nestedGameRoot, launcherName), "launcher");
     const archivePath = path.join(root, "nested-game.zip");
     execFileSync(path7za, ["a", archivePath, "Game Bundle"], {
       cwd: source,
@@ -957,7 +963,7 @@ describe("download controls", () => {
 
     const installDir = path.join(root, "Sample Game");
     expect(database.getDownload(1)?.gameRoot).toBe(path.join(installDir, "Game Bundle", "Windows"));
-    expect(existsSync(path.join(installDir, "Game Bundle", "Windows", "game.exe"))).toBe(true);
+    expect(existsSync(path.join(installDir, "Game Bundle", "Windows", launcherName))).toBe(true);
     database.close();
   });
 
@@ -969,11 +975,11 @@ describe("download controls", () => {
     mkdirSync(installDir);
     mkdirSync(source);
     mkdirSync(path.join(modSource, "patch", "game"), { recursive: true });
-    writeFileSync(path.join(source, "game.exe"), "launcher");
+    writeLauncher(path.join(source, launcherName), "launcher");
     writeFileSync(path.join(modSource, "patch", "game", "patch.rpy"), "reused mod");
     const archivePath = path.join(installDir, "game.zip");
     const modArchivePath = path.join(installDir, "Patch.zip");
-    execFileSync(path7za, ["a", archivePath, "game.exe"], {
+    execFileSync(path7za, ["a", archivePath, launcherName], {
       cwd: source,
       windowsHide: true,
     });
@@ -1011,7 +1017,7 @@ describe("download controls", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(existsSync(archivePath)).toBe(true);
     expect(existsSync(modArchivePath)).toBe(true);
-    expect(existsSync(path.join(installDir, "game.exe"))).toBe(true);
+    expect(existsSync(path.join(installDir, launcherName))).toBe(true);
     expect(await import("node:fs/promises").then(({ readFile }) =>
       readFile(path.join(installDir, "game", "patch.rpy"), "utf8"))).toBe("reused mod");
     database.close();
@@ -1026,10 +1032,10 @@ describe("download controls", () => {
     mkdirSync(gameSource);
     mkdirSync(path.join(modSource, "patch", "game"), { recursive: true });
     mkdirSync(path.join(legacyDirectory, "mods"), { recursive: true });
-    writeFileSync(path.join(gameSource, "game.exe"), "launcher");
+    writeLauncher(path.join(gameSource, launcherName), "launcher");
     writeFileSync(path.join(modSource, "patch", "game", "patch.rpy"), "migrated mod");
     const legacyArchive = path.join(legacyDirectory, "1.archive");
-    execFileSync(path7za, ["a", "-tzip", legacyArchive, "game.exe"], {
+    execFileSync(path7za, ["a", "-tzip", legacyArchive, launcherName], {
       cwd: gameSource,
       windowsHide: true,
     });
@@ -1114,7 +1120,7 @@ describe("game launch and stop", () => {
     const gameDirectory = path.join(directory, "game");
     const gameRoot = path.join(gameDirectory, "Game Bundle");
     mkdirSync(gameRoot, { recursive: true });
-    const executable = path.join(gameRoot, process.platform === "win32" ? "game.exe" : "game.sh");
+    const executable = path.join(gameRoot, launcherName);
     writeFileSync(executable, "test launcher");
     if (process.platform !== "win32") chmodSync(executable, 0o755);
     const database = makeDatabase();

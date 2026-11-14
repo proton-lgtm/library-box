@@ -10,6 +10,7 @@ import { LibraryManager } from "./library-manager";
 import { desktopUserDataPath, portableUserDataPath } from "./portable-path";
 import { createEncryptedSessionStorage, type AuthSessionStorage } from "./secure-session-storage";
 import { SupabaseService } from "./supabase-service";
+import { startAutoUpdates } from "./updater";
 
 declare const __SUPABASE_URL__: string;
 declare const __SUPABASE_PUBLISHABLE_KEY__: string;
@@ -108,6 +109,7 @@ void app.whenReady().then(async () => {
     console.error("Could not initialize Supabase authentication.", error);
   });
   createWindow(downloads, launcher, supabase);
+  startAutoUpdates();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(downloads, launcher, supabase);
   });

@@ -47,6 +47,22 @@ h1 { font-size: clamp(30px, 4vw, 45px); font-weight: 600; letter-spacing: -1.4px
 .form-message.success { color: #9de5c4; }
 .form-message.error { color: #ffb9c2; }
 .configuration-note { color: #ddc398; line-height: 1.7; font-size: 11px; margin: 12px 0 0; }
+.downloads { width: min(880px, 100%); margin-inline: auto; scroll-margin-top: 24px; }
+.downloads h2 { margin: 0 0 10px; font-size: 20px; font-weight: 600; letter-spacing: -.5px; }
+.release-summary { margin: 0 0 20px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.release-summary a, .download-unavailable a { color: #c7b3ff; text-decoration: underline; text-underline-offset: 3px; }
+.download-platforms { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; text-align: left; }
+.download-platform { min-width: 0; padding: 18px; border: 1px solid #ffffff16; border-radius: 12px; background: #1a1b1e; }
+.download-platform h3 { margin: 0 0 15px; font-size: 15px; font-weight: 600; }
+.download-button { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding: 12px; border-radius: 9px; background: #9460ed; color: #fff; font-size: 12px; line-height: 1.5; }
+.download-button:hover { background: #a577f2; color: #fff; }
+.download-button > span { display: flex; justify-content: space-between; gap: 8px; }
+.download-button small { color: #fff; font-size: 10px; }
+.download-unavailable { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding: 12px; border: 1px solid #ffffff16; border-radius: 9px; font-size: 12px; line-height: 1.5; }
+.download-unavailable small { color: #aaa5b1; font-size: 11px; }
+.download-unavailable a { width: fit-content; min-height: 24px; }
+.download-note { max-width: 690px; margin: 16px auto 0; color: #aaa5b1; font-size: 11px; line-height: 1.8; }
+@media (max-width: 650px) { .download-platforms { grid-template-columns: 1fr; gap: 12px; } }
 .demo-section { scroll-margin-top: 25px; }
 .demo-label { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 2px 13px; }
 .demo-label > span { display: flex; align-items: center; gap: 7px; font-size: 9px; letter-spacing: 1.6px; color: #aaa2b6; }

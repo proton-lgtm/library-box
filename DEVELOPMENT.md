@@ -4,7 +4,7 @@ Technical setup, architecture, testing, packaging, and release guidance. For app
 
 ## Architecture
 
-A cross-platform desktop game library built with Electron, React, TypeScript, and Vite. Supabase is the source of truth for the public game catalog and authentication. SQLite caches catalog data for offline browsing and stores device-local download/install state. The Python CLI in `py_box/` remains available independently.
+A cross-platform desktop game library built with Electron, React, TypeScript, and Vite. Supabase is the source of truth for the public game catalog and authentication. SQLite caches catalog data for offline browsing and stores device-local download/install state. The legacy Python CLI has been removed; the Electron app is the supported client.
 
 The interface follows the supplied game-store references: deep navy surfaces, violet accents, subtle halftone texture, rounded artwork panels, and a compact collection sidebar. It uses the Inter variable font bundled locally with the app, so typography is consistent offline and across platforms.
 
@@ -74,11 +74,21 @@ npm run package:mac
 npm run package:linux
 ```
 
-The Windows release workflow builds both a portable executable and an NSIS installer, uploading each as a workflow artifact and attaching both to the GitHub release. It derives the embedded app version and filenames from the release tag (`v0.1.2` produces `Playmart-0.1.2-portable.exe` and `Playmart-0.1.2-setup.exe`), updating both package manifests in the CI checkout before packaging. Packaging explicitly disables electron-builder publishing (`--publish never`), including automatic publishing on tag builds; the separate GitHub CLI release step handles uploads using the workflow token. Manual runs use the supplied release tag and checked-out source commit. Release titles use `Playmart vX.Y.Z`. These CI version changes are not committed back to the repository.
+The release workflow builds on native Windows, Linux, and macOS runners: Windows x64 portable + NSIS, Linux x64 AppImage + deb, and macOS x64/arm64 DMG + ZIP. Architecture-qualified filenames avoid collisions, for example `Playmart-0.1.4-x64-setup.exe`, `Playmart-0.1.4-x64.AppImage`, and `Playmart-0.1.4-arm64.dmg`. macOS ZIP files, blockmaps, and `latest*.yml` manifests are release assets required by the updater, not optional build outputs. The macOS updater manifest must include both architectures.
 
-The Windows release workflow uses the GitHub Actions `prod` environment. Configure its `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` secrets before publishing a release; the packaging step validates their presence and embeds these public client settings during the build. Never use a service-role/secret key for the desktop app.
+The workflow derives the embedded app version from the release tag, updating both package manifests in the CI checkout only. Packaging uses `--publish never`; a separate publication job uploads complete native artifacts to GitHub Releases. Manual runs use the supplied release tag and checked-out source commit. Release titles use `Playmart vX.Y.Z`. Never reuse a published version for changed binaries; publish a newer semantic version.
+
+The release workflow uses the GitHub Actions `prod` environment. Configure its `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` secrets before publishing; every packaging job validates their presence and embeds these public client settings. Never use a service-role/secret key for the desktop app.
 
 Build native packages on their target operating system for the most reliable results. macOS signing/notarization requires macOS and Apple developer tooling; this project does not configure signing credentials. Linux package formats may require distribution-specific build dependencies. Windows, MacOS, and Linux packages have not all been validated from one machine.
+
+### Automatic updates
+
+`electron-updater` uses the public `proton-lgtm/library-box` GitHub Releases feed configured in `package.json`; no GitHub token is shipped to clients. Packaged builds check at startup and every six hours. Installed Windows (NSIS), macOS, and Linux AppImage builds download stable updates automatically and show a native **Restart and install / Later** prompt. Updates never install on exit without approval. Development runs do not check for updates. Network failures remain non-blocking and are retried at the next interval.
+
+Windows portable and Linux non-AppImage packages use the public release API to notify about newer stable versions and open the trusted release page after approval. Debian packages are updated by manually installing a newer package. Existing v0.1.3 contains only Windows installer/portable assets and no updater manifests; those binaries must be upgraded manually to the first updater-enabled release (publish a version newer than v0.1.3).
+
+macOS automatic installation requires a properly code-signed application and matching signing identity across updates. Configure `CSC_LINK` and, when needed, `CSC_KEY_PASSWORD` in the `prod` environment. The workflow enables notarization only when `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` are all available alongside signing credentials. Missing credentials produce explicit CI warnings and unsigned downloads; supplied invalid signing credentials fail the build. Configure Apple signing credentials before promising automatic macOS updates; unsigned development/distribution builds may download but cannot reliably install updates. Notarization is also needed for normal Gatekeeper distribution. Native macOS/Linux package installation and an end-to-end upgrade between two published versions must be validated on their target OS; Windows-only tests do not certify these paths.
 
 ### Packaged archive extraction
 

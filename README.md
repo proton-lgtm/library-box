@@ -2,9 +2,13 @@
 
 A cross-platform desktop game library for browsing, downloading, installing, and launching games. Browse your cached catalog offline, manage downloads and mods, and keep your installed collection in one place.
 
-## Email waitlist website
+## Downloads
 
-The independent [signup website](./signup-website/README.md) is a Vercel-ready Next.js app that collects email waitlist registrations in Supabase with consent and Turnstile verification. See its README for local development, database migration and manual deployment instructions. It does not create user accounts or change the Electron app.
+Download published packages from [GitHub Releases](https://github.com/proton-lgtm/library-box/releases), starting with [v0.1.3](https://github.com/proton-lgtm/library-box/releases/tag/v0.1.3). The independent [download website](./signup-website/README.md) links to available release assets instead of collecting waitlist registrations.
+
+Native release builds target Windows x64 (installer and portable), Linux x64 (AppImage and Debian package), and macOS Intel/Apple Silicon (DMG). Only packages actually published to a release are available to download; v0.1.3 currently contains Windows packages only. Games must themselves be compatible with the host OS.
+
+Updater-enabled installed Windows, macOS, and Linux AppImage builds check GitHub Releases at startup and every six hours, download stable updates automatically, and ask before restarting to install. Choosing **Later** does not install on exit. Portable Windows and Debian packages offer a manual release download instead. Existing v0.1.3 binaries cannot gain an updater retroactively: install a newer updater-enabled release manually first. macOS updates require signed builds; see [release requirements](./DEVELOPMENT.md#automatic-updates).
 
 ## Development
 

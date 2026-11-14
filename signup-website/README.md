@@ -1,14 +1,22 @@
-﻿# Playmart waitlist website
+# Playmart desktop download website
 
-Standalone Next.js/TypeScript app for collecting **email waitlist signups only**. No passwords, Auth accounts, verification emails, mailing integration, or admin dashboard. Vercel Web Analytics tracks page views through the root layout; no custom events or signup email addresses are sent to Analytics. The Electron app and its dependencies are independent.
+Standalone Next.js/TypeScript public desktop download site. The landing page needs **no Supabase, Turnstile, privacy-policy environment setting, email, or signup**. Vercel Web Analytics tracks page views through the root layout; no custom download events are sent. The Electron app and its dependencies are independent.
+
+## Public release downloads
+
+The server reads the public `proton-lgtm/library-box` GitHub Releases API (`/releases/latest`, falling back to `/releases/tags/v0.1.3` on failure or invalid release metadata). No token or other environment variables are needed. Both fetches use Next.js's persistent 15-minute revalidation cache, and the landing page revalidates every 15 minutes as well (including the unavailable state). Each API attempt has a four-second timeout. Development hard refreshes can bypass Next.js caching.
+
+Only published, non-draft, non-prerelease semantic versions at least v0.1.3 are accepted. Links come from uploaded, nonempty release assets, validated against the exact HTTPS repository, release tag and filename; external URLs, credentials, queries and fragments are rejected. No asset URLs are synthesized for display. Installer/portable `.exe`, `.AppImage`, `.deb` and `.dmg` packages are listed with filename-derived processor architecture; unmarked packages explicitly say architecture is unspecified rather than guessing. macOS ARM64 is labeled Apple silicon, x64 is Intel, and universal packages are identified separately.
+
+Missing formats link to the actual release page with a “Not published” message, never a fake download button. API failure links to the repository's releases index with availability unconfirmed. Assets from different versions are never mixed. At implementation time v0.1.3 publishes Windows installer and portable packages only; Linux and macOS therefore correctly show release-page fallbacks. Newly published assets appear after cache revalidation.
 
 ## Interactive preview
 
-The landing page uses self-hosted Inter, a centered heading, short subheading and compact email/Join form above a working desktop preview. Consent and Turnstile verification remain below the signup row. Successful submissions trigger a short decorative confetti animation (disabled for reduced-motion preferences). The form renders the actual signup total with the initial server response, formatted like “Join 2,567 people on the waitlist”, so it is visible before browser JavaScript loads. It refreshes after success without incrementing duplicates locally. If the count is unavailable, it shows “Join the waitlist” instead of an invented number.
+The landing page preserves self-hosted Inter, its centered heading, dark/purple styling and working desktop preview. Server-rendered download cards for Windows, Linux and macOS replace the waitlist form and work without browser JavaScript. Download cards stack on narrow screens.
 
-The preview is entirely local: browse/search mock games, open Details, start a simulated download, pause/resume/cancel it, and find completed games in Library. One sample game is preinstalled so mods can be tried immediately. Select **Mods → Apply mods** to open Downloads and watch the simulated mod installation. Applied mods are marked after completion; cancelling never installs anything. Reloading the browser restores the initial sample state. No preview action calls the signup API, Electron IPC, downloads a file, launches a game or saves anything to Supabase/localStorage.
+The preview is entirely local: browse/search mock games, open Details, start a simulated download, pause/resume/cancel it, and find completed games in Library. Install a sample game in the simulation to try mods. Select **Mods → Apply mods** to open Downloads and watch the simulated mod installation. Applied mods are marked after completion; cancelling never installs anything. Reloading the browser restores the initial sample state. No preview action calls the signup API, Electron IPC, downloads a file, launches a game or saves anything to Supabase/localStorage.
 
-The demo keeps its fixed height without internal scrolling. Catalog card sizes and gaps are preserved, with overflow clipped rather than resized or paginated. On narrow screens, navigation moves to a top row and signup controls stack. Decorative preview labels and both footers are intentionally omitted. All actions are real keyboard-accessible controls; mod selection uses a focus-trapped dialog and backdrop contained within the app preview, with focus return on close.
+The demo keeps its fixed height without internal scrolling. Catalog card sizes and gaps are preserved, with overflow clipped rather than resized or paginated. On narrow screens, navigation moves to a top row and download cards stack. Decorative preview labels and both footers are intentionally omitted. All actions are real keyboard-accessible controls; mod selection uses a focus-trapped dialog and backdrop contained within the app preview, with focus return on close.
 
 ## Local development
 
@@ -17,13 +25,16 @@ Use Node.js 22.18+ (Node 24 recommended) and npm. From the repository root:
 ```powershell
 Set-Location signup-website
 npm ci
-Copy-Item .env.example .env.local
 npm run dev
 ```
 
-Open http://localhost:3000. The page runs without credentials, but submission remains disabled until a privacy policy and Turnstile site key are configured. Real submissions also require all server-side settings below. The root Electron `.env.local` is not used by this standalone app. Do not copy its secrets into this project.
+Open http://localhost:3000. The landing page runs without credentials and never calls the waitlist API. The root Electron `.env.local` is not used by this standalone app. Do not copy its secrets into this project.
 
-## Supabase
+## Retained legacy waitlist (optional)
+
+The unused form and `/api/waitlist` endpoint remain for compatibility, with their existing tests. None of the Supabase/Turnstile setup below is required for the public download site. Do not configure these services for a download-only deployment. If retiring the endpoint operationally, remove its old secrets and block `/api/waitlist` at your hosting edge; existing signup records are unaffected.
+
+## Legacy Supabase setup
 
 1. Select the Supabase project you want to use. Either use the existing project's database or create a separate project manually for the waitlist.
 2. Run [`20261111220000_waitlist_signups.sql`](../supabase/migrations/20261111220000_waitlist_signups.sql), then [`20261113220000_waitlist_signup_count.sql`](../supabase/migrations/20261113220000_waitlist_signup_count.sql) in that project's SQL editor. A separate waitlist project needs only these two migrations, not the game catalog migrations. If using Supabase CLI migration tooling on the existing project, follow its normal pending migration workflow instead. The second migration grants the server role access to a count-only function; no role gains read access to individual signup records.
@@ -61,11 +72,10 @@ No infrastructure has been provisioned or deployed automatically.
 1. Import this Git repository into Vercel.
 2. Set **Root Directory** to `signup-website` and select **Next.js**.
 3. Use the default install/build commands (`npm ci` / `npm run build`) and Next.js output settings. Use Node 24 or another supported 22.18+ runtime.
-4. Apply the migration and configure all six variables for the target environment. Never prefix either secret with `NEXT_PUBLIC_`.
-5. Add the deployed domain to the Turnstile widget and `TURNSTILE_EXPECTED_HOSTNAMES`. Configure Preview deployments separately; use exact trusted preview hostnames or disable signup for previews rather than allowing arbitrary hosts.
-6. Deploy. When changing the public site key, rebuild the app. Verify the policy link and successful submissions before sharing publicly.
+4. No environment variables, migrations or Turnstile widget are needed for downloads. Leave legacy signup secrets unset unless the retained endpoint is intentionally used.
+5. Deploy only when explicitly authorized. Verify that each download points to an actual published asset and missing platforms link to release files instead.
 
-No additional `vercel.json` is required. Keep the form and `/api/waitlist` on the same origin.
+No additional `vercel.json` is required. No deployment is performed by this conversion.
 
 ## Submission behavior
 
@@ -109,13 +119,14 @@ npm run typecheck
 npm run build
 ```
 
+Focused release tests cover actual v0.1.3 Windows filenames, package/architecture classification, untrusted metadata and URLs, prerelease/minimum-version rejection, caching options, latest-to-tag fallback, timeouts, total API failure and version consistency. Existing demo and legacy endpoint tests remain.
+
 Manual smoke checks:
-- Desktop and 375px mobile: no horizontal overflow, readable preview/form, keyboard-visible focus, correct labels.
-- Missing public configuration: signup disabled with a setup message.
-- Valid challenge + explicit consent: loading state, then generic success.
-- Duplicate email: identical success; no duplicate row or changed consent timestamp.
-- Invalid/expired challenge or network error: error message; email and consent retained; fresh challenge required.
-- Supabase permissions: public/anonymous roles cannot query the signup table.
+- Desktop and 375px mobile: no horizontal overflow, readable preview/download cards, keyboard-visible focus, correct labels.
+- No legacy environment variables: landing page and demo still work; no email form, Turnstile widget or waitlist count request.
+- Published assets: download links match the API, with processor labels; unavailable platforms show explicit release-page fallbacks.
+- API outage: page still renders with availability unconfirmed and a working GitHub Releases link.
+- Preview: search, simulated game installation, pause/resume/cancel, and mod installation still work.
 
 Do not run real provider submissions in automated tests. Website tests use the `.node.ts` suffix so the parent Electron Vitest runner does not discover them. The migration has not been applied by this repository change.
 
