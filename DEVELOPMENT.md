@@ -40,6 +40,8 @@ npm test
 npm run build
 ```
 
+Archive service tests canonicalize temporary fixture directories with `realpathSync` because macOS temporary paths can contain the `/var` system symlink. Production archive validation still rejects symlinks and junctions. Launcher tests cover Windows and POSIX process stopping with mocked OS termination calls; they must never signal the synthetic fixture PID. Real archive-install tests use bounded five-second completion waits and a fifteen-second test budget for setup and cleanup on CI runners.
+
 ### Electron smoke testing
 
 Use the `electron-tester` custom agent for interactive renderer smoke tests. Start the app with both the Node inspector and a renderer DevTools port:

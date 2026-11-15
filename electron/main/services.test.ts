@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { execFileSync, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
@@ -20,7 +20,7 @@ vi.mock("electron", async (importOriginal) => {
   }
   return { ...actual, BrowserWindow: TestBrowserWindow };
 });
-import { validateArchivePaths, extractArchive } from "./archive";
+import { assertUnlinkedPath, validateArchivePaths, extractArchive } from "./archive";
 import { canTransition, LibraryDatabase } from "./database";
 import {
   DownloadManager,
@@ -47,7 +47,8 @@ function writeLauncher(filePath: string, content: string): void {
 }
 
 function makeTempDirectory(): string {
-  const directory = mkdtempSync(path.join(os.tmpdir(), "redline-test-"));
+  // macOS aliases its temporary directory through /var, which archive safety checks reject.
+  const directory = realpathSync(mkdtempSync(path.join(os.tmpdir(), "redline-test-")));
   temporaryDirectories.push(directory);
   return directory;
 }
@@ -65,6 +66,7 @@ function makeDatabase(): LibraryDatabase {
 
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
   vi.mocked(spawn).mockImplementation(actual.spawn);
@@ -479,7 +481,7 @@ describe("SQLite library", () => {
   });
 });
 
-describe("download controls", () => {
+describe("download controls", { timeout: 15_000 }, () => {
   it("overwrites an existing game folder when it has no reusable archive", async () => {
     const root = makeTempDirectory();
     const installDir = path.join(root, "Sample Game");
@@ -508,7 +510,7 @@ describe("download controls", () => {
       runAfter: false,
       selectedModIds: [],
     });
-    await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"));
+    await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"), { timeout: 5000 });
 
     expect(existsSync(path.join(installDir, "old-file.txt"))).toBe(false);
     expect(existsSync(path.join(installDir, launcherName))).toBe(true);
@@ -959,7 +961,7 @@ describe("download controls", () => {
       runAfter: false,
       selectedModIds: [],
     });
-    await vi.waitFor(() => expect(database.getDownload(1)).toMatchObject({ status: "installed" }));
+    await vi.waitFor(() => expect(database.getDownload(1)).toMatchObject({ status: "installed" }), { timeout: 5000 });
 
     const installDir = path.join(root, "Sample Game");
     expect(database.getDownload(1)?.gameRoot).toBe(path.join(installDir, "Game Bundle", "Windows"));
@@ -1012,7 +1014,7 @@ describe("download controls", () => {
       runAfter: false,
       selectedModIds: [0],
     });
-    await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"));
+    await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"), { timeout: 5000 });
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(existsSync(archivePath)).toBe(true);
@@ -1078,7 +1080,7 @@ describe("download controls", () => {
       runAfter: false,
       selectedModIds: [0],
     });
-    await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"));
+    await vi.waitFor(() => expect(database.getDownload(1)?.status).toBe("installed"), { timeout: 5000 });
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(existsSync(path.join(installDir, "game.zip"))).toBe(true);
@@ -1091,6 +1093,18 @@ describe("download controls", () => {
 });
 
 describe("safe archive extraction", () => {
+  it("uses canonical fixture paths when the OS temporary directory is a symlink", async () => {
+    const root = makeTempDirectory();
+    const temporaryRoot = path.join(root, "temporary");
+    const alias = path.join(root, "temporary-alias");
+    mkdirSync(temporaryRoot);
+    symlinkSync(temporaryRoot, alias, process.platform === "win32" ? "junction" : "dir");
+    vi.spyOn(os, "tmpdir").mockReturnValue(alias);
+    const directory = makeTempDirectory();
+    expect(path.dirname(directory)).toBe(realpathSync(temporaryRoot));
+    await expect(assertUnlinkedPath(directory)).resolves.toBeUndefined();
+    await expect(assertUnlinkedPath(path.join(alias, path.basename(directory)))).rejects.toThrow(/symbolic link/);
+  });
   it("rejects traversal and absolute archive paths", () => {
     const destination = path.join(makeTempDirectory(), "install");
     for (const unsafePath of ["../outside.txt", "folder/../../outside.txt", "C:\\outside.txt", "\\\\server\\share\\file"]) {
@@ -1115,12 +1129,13 @@ describe("safe archive extraction", () => {
 });
 
 describe("game launch and stop", () => {
-  it("spawns the game without a shell and stops its process tree", async () => {
+  it.each(["win32", "linux", "darwin"])("spawns and stops the %s process tree without a shell", async (platform) => {
+    vi.stubGlobal("process", Object.create(process, { platform: { value: platform } }));
     const directory = makeTempDirectory();
     const gameDirectory = path.join(directory, "game");
     const gameRoot = path.join(gameDirectory, "Game Bundle");
     mkdirSync(gameRoot, { recursive: true });
-    const executable = path.join(gameRoot, launcherName);
+    const executable = path.join(gameRoot, platform === "win32" ? "game.exe" : "game.sh");
     writeFileSync(executable, "test launcher");
     if (process.platform !== "win32") chmodSync(executable, 0o755);
     const database = makeDatabase();
@@ -1150,13 +1165,20 @@ describe("game launch and stop", () => {
       expect.objectContaining({ shell: false, cwd: gameRoot }),
     );
     expect(launcher.runningIds().has(1)).toBe(true);
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
     launcher.stop(1);
-    expect(spawn).toHaveBeenNthCalledWith(
-      2,
-      "taskkill",
-      ["/PID", "9876", "/T", "/F"],
-      expect.objectContaining({ shell: false }),
-    );
+    if (process.platform === "win32") {
+      expect(spawn).toHaveBeenNthCalledWith(
+        2,
+        "taskkill",
+        ["/PID", "9876", "/T", "/F"],
+        expect.objectContaining({ shell: false }),
+      );
+      expect(kill).not.toHaveBeenCalled();
+    } else {
+      expect(kill).toHaveBeenCalledExactlyOnceWith(-9876, "SIGTERM");
+      expect(spawn).toHaveBeenCalledOnce();
+    }
     expect(launcher.runningIds().has(1)).toBe(false);
     database.close();
   });
